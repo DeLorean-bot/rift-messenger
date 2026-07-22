@@ -1,0 +1,2 @@
+RIFT P2P attachment smoke test.
+This file contains no user data.
