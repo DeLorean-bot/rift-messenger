@@ -22,6 +22,7 @@ import {
   ScanQrCode,
   Send,
   Settings,
+  Sliders,
   Sparkles,
   Users,
   UserPlus,
@@ -32,7 +33,7 @@ import {
 } from 'lucide-react';
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { createRnnoiseTrack, type RnnoiseHandle } from './audio/rnnoise';
+import { createMicPipeline, type MicPipeline } from './audio/micPipeline';
 import { AttachmentView } from './AttachmentView';
 import { base64ToBytes, bytesToBase64, saveAttachment } from './files';
 import { Onboarding } from './Onboarding';
@@ -117,6 +118,14 @@ function App() {
   const [cameraOn, setCameraOn] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [noiseSuppressionOn, setNoiseSuppressionOn] = useLocalStorageState('rift.rnnoise', true);
+  const [micGain, setMicGain] = useLocalStorageState('rift.micGain', 1);
+  const [inputDeviceId, setInputDeviceId] = useLocalStorageState('rift.micDevice', '');
+  const [outputDeviceId, setOutputDeviceId] = useLocalStorageState('rift.speaker', '');
+  const [pttEnabled, setPttEnabled] = useLocalStorageState('rift.ptt', false);
+  const [pttActive, setPttActive] = useState(false);
+  const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
+  const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
+  const [audioModalOpen, setAudioModalOpen] = useState(false);
   const [remoteAudioOn, setRemoteAudioOn] = useState(false);
   const [remoteVideoOn, setRemoteVideoOn] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
@@ -126,7 +135,7 @@ function App() {
   const channelRef = useRef<RTCDataChannel | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const rawMicTrackRef = useRef<MediaStreamTrack | null>(null);
-  const rnnoiseRef = useRef<RnnoiseHandle | null>(null);
+  const micPipelineRef = useRef<MicPipeline | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef(new MediaStream());
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -522,6 +531,7 @@ function App() {
           echoCancellation: true,
           noiseSuppression: !noiseSuppressionOn,
           sampleRate: 48000,
+          ...(inputDeviceId ? { deviceId: { exact: inputDeviceId } } : {}),
         } : false,
         video: kind === 'camera' && !stream.getVideoTracks().length,
       });
@@ -529,15 +539,21 @@ function App() {
         let track = capturedTrack;
         if (capturedTrack.kind === 'audio') {
           rawMicTrackRef.current = capturedTrack;
-          if (noiseSuppressionOn) {
-            try {
-              rnnoiseRef.current = await createRnnoiseTrack(capturedTrack, RNNOISE_START_TIMEOUT_MS);
-              track = rnnoiseRef.current.track;
-            } catch (rnnoiseError) {
-              console.warn('[RIFT] RNNoise unavailable, using browser suppression', rnnoiseError);
+          try {
+            const pipeline = await createMicPipeline(capturedTrack, {
+              rnnoise: noiseSuppressionOn,
+              gain: micGain,
+              rnnoiseTimeoutMs: RNNOISE_START_TIMEOUT_MS,
+            });
+            micPipelineRef.current = pipeline;
+            track = pipeline.track;
+            if (noiseSuppressionOn && !pipeline.rnnoiseActive()) {
               await capturedTrack.applyConstraints({ noiseSuppression: true }).catch(() => undefined);
               setNoiseSuppressionOn(false);
             }
+          } catch (pipelineError) {
+            console.warn('[RIFT] mic pipeline unavailable, sending raw mic', pipelineError);
+            await capturedTrack.applyConstraints({ noiseSuppression: true }).catch(() => undefined);
           }
         }
         stream.addTrack(track);
@@ -549,12 +565,12 @@ function App() {
         }
       }
       localStreamRef.current = stream;
-      setMicOn(stream.getAudioTracks().some((track) => track.enabled));
+      if (stream.getAudioTracks().length) setMicOn(true);
       setCameraOn(stream.getVideoTracks().some((track) => track.enabled));
       setCallOpen(true);
       window.requestAnimationFrame(attachCallStreams);
       sendCallState(
-        stream.getAudioTracks().some((track) => track.enabled),
+        stream.getAudioTracks().length > 0,
         stream.getVideoTracks().some((track) => track.enabled) || sharing,
       );
       await renegotiateMedia();
@@ -575,7 +591,6 @@ function App() {
       await enableMedia('mic');
       return;
     }
-    audioTrack.enabled = true;
     setMicOn(true);
     sendCallState(true, cameraOn || sharing);
   };
@@ -583,44 +598,146 @@ function App() {
   const toggleMic = async () => {
     const track = localStreamRef.current?.getAudioTracks()[0];
     if (!track) return enableMedia('mic');
-    track.enabled = !track.enabled;
-    setMicOn(track.enabled);
-    sendCallState(track.enabled, cameraOn || sharing);
+    const next = !micOn;
+    setMicOn(next);
+    sendCallState(next, cameraOn || sharing);
+  };
+
+  // Keep the send-side audio track muted/unmuted from derived state so that
+  // push-to-talk, the mic button, and RNNoise toggling all stay consistent.
+  useEffect(() => {
+    const track = localStreamRef.current?.getAudioTracks()[0];
+    if (!track) return;
+    track.enabled = pttEnabled ? (micOn && pttActive) : micOn;
+  }, [micOn, pttEnabled, pttActive, callOpen]);
+
+  const changeMicGain = (value: number) => {
+    setMicGain(value);
+    micPipelineRef.current?.setGain(value);
   };
 
   const toggleNoiseSuppression = async () => {
+    const pipeline = micPipelineRef.current;
     const rawTrack = rawMicTrackRef.current;
-    const stream = localStreamRef.current;
-    const currentTrack = stream?.getAudioTracks()[0];
-    if (!rawTrack || !stream || !currentTrack) {
-      setNoiseSuppressionOn(!noiseSuppressionOn);
+    const next = !noiseSuppressionOn;
+    if (!pipeline) {
+      setNoiseSuppressionOn(next);
       return;
     }
-
-    const enabled = currentTrack.enabled;
     try {
-      let nextTrack: MediaStreamTrack;
-      if (noiseSuppressionOn) {
-        rnnoiseRef.current?.stop();
-        rnnoiseRef.current = null;
-        nextTrack = rawTrack;
-        await rawTrack.applyConstraints({ noiseSuppression: true }).catch(() => undefined);
+      if (next) {
+        await rawTrack?.applyConstraints({ noiseSuppression: false }).catch(() => undefined);
+        await pipeline.setRnnoise(true);
+        if (!pipeline.rnnoiseActive()) {
+          await rawTrack?.applyConstraints({ noiseSuppression: true }).catch(() => undefined);
+          setNoiseSuppressionOn(false);
+          setError('RNNoise недоступен — оставил браузерное шумоподавление');
+          return;
+        }
       } else {
-        await rawTrack.applyConstraints({ noiseSuppression: false }).catch(() => undefined);
-        rnnoiseRef.current = await createRnnoiseTrack(rawTrack, RNNOISE_START_TIMEOUT_MS);
-        nextTrack = rnnoiseRef.current.track;
+        await pipeline.setRnnoise(false);
+        await rawTrack?.applyConstraints({ noiseSuppression: true }).catch(() => undefined);
       }
-      nextTrack.enabled = enabled;
-      stream.removeTrack(currentTrack);
+      setNoiseSuppressionOn(next);
+    } catch (rnnoiseError) {
+      console.error('[RIFT] failed to switch RNNoise', rnnoiseError);
+      setError('Не удалось переключить RNNoise — оставил текущее аудио без изменений');
+    }
+  };
+
+  const refreshAudioDevices = useCallback(async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setAudioInputs(devices.filter((device) => device.kind === 'audioinput'));
+      setAudioOutputs(devices.filter((device) => device.kind === 'audiooutput'));
+    } catch {
+      // Enumeration can fail before any permission is granted; ignore.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAudioDevices();
+    const md = navigator.mediaDevices;
+    md?.addEventListener?.('devicechange', refreshAudioDevices);
+    return () => md?.removeEventListener?.('devicechange', refreshAudioDevices);
+  }, [refreshAudioDevices]);
+
+  // Route remote audio to the chosen output device (speakers/headset).
+  useEffect(() => {
+    const element = remoteAudioRef.current as (HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }) | null;
+    if (element?.setSinkId && outputDeviceId) {
+      void element.setSinkId(outputDeviceId).catch(() => undefined);
+    }
+  }, [outputDeviceId, callOpen]);
+
+  // Push-to-talk: while enabled, Space (outside text fields) unmutes the mic.
+  useEffect(() => {
+    if (!callOpen || !pttEnabled) {
+      setPttActive(false);
+      return;
+    }
+    const isTyping = () => {
+      const element = document.activeElement as HTMLElement | null;
+      return Boolean(element && (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA' || element.isContentEditable));
+    };
+    const onDown = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' || isTyping()) return;
+      event.preventDefault();
+      if (!event.repeat) setPttActive(true);
+    };
+    const onUp = (event: KeyboardEvent) => {
+      if (event.code !== 'Space') return;
+      setPttActive(false);
+    };
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    return () => {
+      window.removeEventListener('keydown', onDown);
+      window.removeEventListener('keyup', onUp);
+    };
+  }, [callOpen, pttEnabled]);
+
+  const changeInputDevice = async (deviceId: string) => {
+    setInputDeviceId(deviceId);
+    const stream = localStreamRef.current;
+    if (!stream?.getAudioTracks().length) return; // applied next time the mic starts
+    try {
+      const media = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          autoGainControl: true,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: !noiseSuppressionOn,
+          sampleRate: 48000,
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        },
+        video: false,
+      });
+      const newRaw = media.getAudioTracks()[0];
+      micPipelineRef.current?.stop();
+      micPipelineRef.current = null;
+      rawMicTrackRef.current?.stop();
+      rawMicTrackRef.current = newRaw;
+      const pipeline = await createMicPipeline(newRaw, {
+        rnnoise: noiseSuppressionOn,
+        gain: micGain,
+        rnnoiseTimeoutMs: RNNOISE_START_TIMEOUT_MS,
+      });
+      micPipelineRef.current = pipeline;
+      const nextTrack = pipeline.track;
+      nextTrack.enabled = pttEnabled ? (micOn && pttActive) : micOn;
+      const oldTrack = stream.getAudioTracks()[0];
+      if (oldTrack) stream.removeTrack(oldTrack);
       stream.addTrack(nextTrack);
       const sender = pcRef.current?.getTransceivers()
         .find((item) => item.receiver.track.kind === 'audio')?.sender;
       await sender?.replaceTrack(nextTrack);
-      setNoiseSuppressionOn(!noiseSuppressionOn);
-      window.requestAnimationFrame(attachCallStreams);
-    } catch (rnnoiseError) {
-      console.error('[RIFT] failed to switch RNNoise', rnnoiseError);
-      setError('Не удалось переключить RNNoise — оставил текущее аудио без изменений');
+      if (noiseSuppressionOn && !pipeline.rnnoiseActive()) {
+        await newRaw.applyConstraints({ noiseSuppression: true }).catch(() => undefined);
+        setNoiseSuppressionOn(false);
+      }
+    } catch {
+      setError('Не удалось переключить микрофон — устройство занято или недоступно');
     }
   };
 
@@ -671,8 +788,8 @@ function App() {
     pcRef.current?.getSenders().forEach((sender) => {
       if (sender.track?.kind === 'audio' || sender.track?.kind === 'video') void sender.replaceTrack(null);
     });
-    rnnoiseRef.current?.stop();
-    rnnoiseRef.current = null;
+    micPipelineRef.current?.stop();
+    micPipelineRef.current = null;
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     rawMicTrackRef.current?.stop();
     rawMicTrackRef.current = null;
@@ -841,7 +958,7 @@ function App() {
   }, []);
 
   useEffect(() => () => {
-    rnnoiseRef.current?.stop();
+    micPipelineRef.current?.stop();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     rawMicTrackRef.current?.stop();
     screenStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -917,7 +1034,7 @@ function App() {
           <div className="avatar">{profileName.slice(0, 1).toUpperCase()}<span /></div>
           <button className="user-copy" onClick={() => { setProfileDraft(profileName); setProfileModalOpen(true); }}><strong>{profileName}</strong><span>#локально</span></button>
           <button onClick={toggleMic}>{micOn ? <Mic size={17} /> : <MicOff size={17} />}</button>
-          <button><Headphones size={17} /></button>
+          <button onClick={() => { void refreshAudioDevices(); setAudioModalOpen(true); }} title="Настройки звука"><Headphones size={17} /></button>
           <button onClick={() => { setProfileDraft(profileName); setProfileModalOpen(true); }}><Settings size={17} /></button>
         </footer>
       </aside>
@@ -941,6 +1058,7 @@ function App() {
             <div className="call-bar-controls">
               <button onClick={toggleMic} className={micOn ? 'enabled' : ''} title={micOn ? 'Выключить микрофон' : 'Включить микрофон'}>{micOn ? <Mic /> : <MicOff />}</button>
               <button onClick={() => void toggleNoiseSuppression()} className={noiseSuppressionOn ? 'enabled accent' : ''} title={`RNNoise: ${noiseSuppressionOn ? 'включён' : 'выключен'}`}><Waves /></button>
+              <button onClick={() => { void refreshAudioDevices(); setAudioModalOpen(true); }} title="Настройки звука"><Sliders /></button>
               <button onClick={() => setCallMinimized(false)} title="Развернуть звонок"><Maximize2 /></button>
               <button onClick={hangUp} className="danger" title="Выйти из звонка"><PhoneOff /></button>
             </div>
@@ -961,11 +1079,17 @@ function App() {
                 <span className="video-label">{profileName} {sharing && '· экран'}</span>
               </div>
             </div>
+            {pttEnabled && (
+              <div className={pttActive ? 'ptt-hint talking' : 'ptt-hint'}>
+                <Radio size={14} /> {pttActive ? 'Говоришь…' : 'Push-to-talk: держи пробел, чтобы говорить'}
+              </div>
+            )}
             <div className="call-controls">
-              <button onClick={toggleMic} className={micOn ? 'enabled' : ''}>{micOn ? <Mic /> : <MicOff />}</button>
+              <button onClick={toggleMic} className={(pttEnabled ? (micOn && pttActive) : micOn) ? 'enabled' : ''} title={pttEnabled ? 'Push-to-talk активен (пробел)' : (micOn ? 'Выключить микрофон' : 'Включить микрофон')}>{(pttEnabled ? (micOn && pttActive) : micOn) ? <Mic /> : <MicOff />}</button>
               <button onClick={() => void toggleNoiseSuppression()} className={noiseSuppressionOn ? 'enabled accent' : ''} title={`Шумоподавление RNNoise: ${noiseSuppressionOn ? 'включено' : 'выключено'}`}><Waves /></button>
               <button onClick={toggleCamera} className={cameraOn ? 'enabled' : ''}>{cameraOn ? <Camera /> : <CameraOff />}</button>
               <button onClick={toggleScreen} className={sharing ? 'enabled accent' : ''}><MonitorUp /></button>
+              <button onClick={() => { void refreshAudioDevices(); setAudioModalOpen(true); }} title="Настройки звука"><Sliders /></button>
               <button onClick={() => setCallMinimized(true)} title="Свернуть звонок"><Minimize2 /></button>
               <button onClick={hangUp} className="danger"><PhoneOff /></button>
             </div>
@@ -1040,6 +1164,46 @@ function App() {
             <p className="field-hint">Имя хранится локально и отправляется собеседнику вместе с сообщением.</p>
             <button className="primary-action" disabled={!profileDraft.trim()}>Сохранить профиль</button>
           </form>
+        </div>
+      )}
+
+      {audioModalOpen && (
+        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setAudioModalOpen(false)}>
+          <div className="small-modal audio-modal">
+            <button type="button" className="modal-close" onClick={() => setAudioModalOpen(false)}><X size={20} /></button>
+            <div className="modal-kicker">НАСТРОЙКИ ЗВУКА</div>
+            <h2>Микрофон и звук</h2>
+
+            <label className="field-label" htmlFor="audio-input"><Mic size={15} /> Микрофон</label>
+            <div className="named-input select">
+              <select id="audio-input" value={inputDeviceId} onChange={(event) => void changeInputDevice(event.target.value)}>
+                <option value="">По умолчанию</option>
+                {audioInputs.map((device, index) => (
+                  <option key={device.deviceId || index} value={device.deviceId}>{device.label || `Микрофон ${index + 1}`}</option>
+                ))}
+              </select>
+            </div>
+
+            <label className="field-label" htmlFor="audio-output"><Volume2 size={15} /> Вывод звука</label>
+            <div className="named-input select">
+              <select id="audio-output" value={outputDeviceId} onChange={(event) => setOutputDeviceId(event.target.value)}>
+                <option value="">По умолчанию</option>
+                {audioOutputs.map((device, index) => (
+                  <option key={device.deviceId || index} value={device.deviceId}>{device.label || `Динамик ${index + 1}`}</option>
+                ))}
+              </select>
+            </div>
+            {audioOutputs.length === 0 && <p className="field-hint">Выбор вывода станет доступен после первого входа в звонок (нужны разрешения на устройства).</p>}
+
+            <label className="field-label" htmlFor="mic-gain"><Sliders size={15} /> Громкость микрофона · {Math.round(micGain * 100)}%</label>
+            <input id="mic-gain" type="range" min={0} max={2} step={0.05} value={micGain} onChange={(event) => changeMicGain(Number(event.target.value))} className="gain-slider" />
+
+            <div className="toggle-row">
+              <button type="button" onClick={() => void toggleNoiseSuppression()} className={noiseSuppressionOn ? 'toggle-pill on' : 'toggle-pill'}><Waves size={15} /> RNNoise {noiseSuppressionOn ? 'вкл' : 'выкл'}</button>
+              <button type="button" onClick={() => setPttEnabled((value) => !value)} className={pttEnabled ? 'toggle-pill on' : 'toggle-pill'}><Radio size={15} /> Push-to-talk {pttEnabled ? 'вкл' : 'выкл'}</button>
+            </div>
+            <p className="field-hint">{pttEnabled ? 'Микрофон молчит, пока не удерживаешь пробел (не срабатывает при вводе текста).' : 'Микрофон открыт постоянно, пока включён в звонке.'}</p>
+          </div>
         </div>
       )}
 
