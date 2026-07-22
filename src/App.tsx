@@ -58,6 +58,9 @@ const FILE_CHUNK_SIZE = 12 * 1024;
 // Bound RNNoise WASM/AudioWorklet startup so a slow WebView or an underpowered
 // machine falls back to browser suppression instead of stalling call start.
 const RNNOISE_START_TIMEOUT_MS = 8_000;
+// Bounded ICE restart: how many times to renegotiate ICE over the still-open
+// data channel before declaring the direct route unrecoverable.
+const MAX_ICE_RESTARTS = 4;
 const WEBRTC_UNAVAILABLE_MESSAGE = 'Это встроенное окно не поддерживает WebRTC. Открой http://localhost:5173 в Chrome или Edge либо запусти Windows-приложение RIFT.';
 
 const servers = [
@@ -149,6 +152,7 @@ function App() {
   const makingMediaOfferRef = useRef(false);
   const handledLinksRef = useRef(new Set<string>());
   const disconnectedTimerRef = useRef<number | null>(null);
+  const iceRestartAttemptsRef = useRef(0);
   const activeChannelRef = useRef(activeChannelId);
   const activeChannel = channels.find((channel) => channel.id === activeChannelId) || channels[0];
   const messages = messagesByChannel[activeChannel?.id] || [];
@@ -169,18 +173,32 @@ function App() {
     });
   }, []);
 
-  const sendCurrentMediaOffer = useCallback(async () => {
+  const sendCurrentMediaOffer = useCallback(async (options?: RTCOfferOptions) => {
     const pc = pcRef.current;
     const channel = channelRef.current;
     if (!pc || channel?.readyState !== 'open' || pc.signalingState !== 'stable' || makingMediaOfferRef.current) return;
     makingMediaOfferRef.current = true;
     try {
-      await pc.setLocalDescription(await pc.createOffer());
+      await pc.setLocalDescription(await pc.createOffer(options));
       channel.send(JSON.stringify({ type: 'rtc-offer', description: pc.localDescription }));
     } finally {
       makingMediaOfferRef.current = false;
     }
   }, []);
+
+  // Recover a dropped media route by renegotiating ICE over the still-open
+  // encrypted data channel. The impolite peer drives the restart offer; the
+  // polite peer asks for one. If the channel is gone there is no signaling
+  // path left, so recovery is impossible without re-pairing.
+  const attemptIceRestart = useCallback(() => {
+    const channel = channelRef.current;
+    if (channel?.readyState !== 'open') return;
+    if (politePeerRef.current) {
+      channel.send(JSON.stringify({ type: 'rtc-ice-restart-request' }));
+    } else {
+      void sendCurrentMediaOffer({ iceRestart: true });
+    }
+  }, [sendCurrentMediaOffer]);
 
   useEffect(() => {
     activeChannelRef.current = activeChannelId;
@@ -206,12 +224,13 @@ function App() {
         setRemoteVideoOn(Boolean(payload.video));
         return;
       }
-      if (payload.type === 'rtc-renegotiate-request') {
+      if (payload.type === 'rtc-renegotiate-request' || payload.type === 'rtc-ice-restart-request') {
         if (politePeerRef.current) return;
+        const offerOptions = payload.type === 'rtc-ice-restart-request' ? { iceRestart: true } : undefined;
         void (async () => {
           for (let attempt = 0; attempt < 30; attempt += 1) {
             if (pcRef.current?.signalingState === 'stable') {
-              await sendCurrentMediaOffer();
+              await sendCurrentMediaOffer(offerOptions);
               return;
             }
             await new Promise((resolve) => window.setTimeout(resolve, 100));
@@ -335,31 +354,50 @@ function App() {
       if (currentAudio) void audioTransceiver.sender.replaceTrack(currentAudio);
       if (currentVideo) void videoTransceiver.sender.replaceTrack(currentVideo);
     }
+    const scheduleIceRecovery = (peer: RTCPeerConnection) => {
+      if (disconnectedTimerRef.current !== null) return; // recovery already running
+      const step = () => {
+        disconnectedTimerRef.current = null;
+        if (pcRef.current !== peer) return;
+        const state = peer.connectionState;
+        if (state === 'connected' || state === 'closed') {
+          iceRestartAttemptsRef.current = 0;
+          return;
+        }
+        if (channelRef.current?.readyState !== 'open' || iceRestartAttemptsRef.current >= MAX_ICE_RESTARTS) {
+          setStatus('связь потеряна');
+          setError('Не удалось восстановить прямое соединение. Создайте новое приглашение.');
+          return;
+        }
+        iceRestartAttemptsRef.current += 1;
+        setStatus(`восстанавливаем связь… (попытка ${iceRestartAttemptsRef.current})`);
+        attemptIceRestart();
+        disconnectedTimerRef.current = window.setTimeout(step, Math.min(2500 * iceRestartAttemptsRef.current, 8_000));
+      };
+      // Give ICE a moment to self-heal before forcing a restart.
+      disconnectedTimerRef.current = window.setTimeout(step, 1_500);
+    };
+
     pc.onconnectionstatechange = () => {
       if (pcRef.current !== pc) return;
-      const labels: Record<string, string> = {
-        new: 'ожидание', connecting: 'соединяемся…', connected: 'прямое соединение', closed: 'соединение закрыто',
-      };
-      if (pc.connectionState === 'connected') {
+      const state = pc.connectionState;
+      if (state === 'connected') {
+        iceRestartAttemptsRef.current = 0;
         if (disconnectedTimerRef.current !== null) window.clearTimeout(disconnectedTimerRef.current);
         disconnectedTimerRef.current = null;
-        setStatus(labels.connected);
+        setError('');
+        setStatus('прямое соединение');
         return;
       }
-      if (pc.connectionState === 'disconnected') {
-        setStatus('восстанавливаем связь…');
-        if (disconnectedTimerRef.current !== null) window.clearTimeout(disconnectedTimerRef.current);
-        disconnectedTimerRef.current = window.setTimeout(() => {
-          if (pcRef.current === pc && pc.connectionState === 'disconnected') setStatus('связь потеряна');
-        }, 8_000);
+      if (state === 'disconnected' || state === 'failed') {
+        setStatus(state === 'failed' ? 'связь прервалась, восстанавливаем…' : 'восстанавливаем связь…');
+        scheduleIceRecovery(pc);
         return;
       }
-      if (pc.connectionState === 'failed') {
-        setStatus('не удалось соединиться');
-        setError('Сети не пропустили прямое P2P-соединение. Попробуйте другую сеть или один Wi-Fi.');
-        return;
-      }
-      setStatus(labels[pc.connectionState] || pc.connectionState);
+      const labels: Record<string, string> = {
+        new: 'ожидание', connecting: 'соединяемся…', closed: 'соединение закрыто',
+      };
+      setStatus(labels[state] || state);
     };
     pc.ondatachannel = (event) => bindChannel(event.channel);
     pc.ontrack = (event) => {
@@ -382,7 +420,7 @@ function App() {
       window.requestAnimationFrame(attachCallStreams);
     };
     return pc;
-  }, [attachCallStreams, bindChannel]);
+  }, [attachCallStreams, bindChannel, attemptIceRestart]);
 
   const renegotiateMedia = async () => {
     const channel = channelRef.current;
