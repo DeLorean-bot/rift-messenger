@@ -5,7 +5,7 @@ export type RnnoiseHandle = {
   stop: () => void;
 };
 
-export async function createRnnoiseTrack(sourceTrack: MediaStreamTrack): Promise<RnnoiseHandle> {
+async function buildRnnoiseTrack(sourceTrack: MediaStreamTrack): Promise<RnnoiseHandle> {
   const context = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
   try {
     if (context.state === 'suspended') await context.resume();
@@ -35,5 +35,47 @@ export async function createRnnoiseTrack(sourceTrack: MediaStreamTrack): Promise
     void context.close();
     throw error;
   }
+}
+
+/**
+ * Build an RNNoise-processed track. When `timeoutMs` is set and the WASM
+ * worklet does not come up in time (slow WebView / underpowered CI runner),
+ * the pending build is torn down and the promise rejects so callers can fall
+ * back to browser noise suppression instead of stalling the whole call start.
+ */
+export function createRnnoiseTrack(
+  sourceTrack: MediaStreamTrack,
+  timeoutMs = 0,
+): Promise<RnnoiseHandle> {
+  const build = buildRnnoiseTrack(sourceTrack);
+  if (!timeoutMs) return build;
+
+  return new Promise<RnnoiseHandle>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      // If the build eventually succeeds after we gave up, release its resources.
+      build.then((handle) => handle.stop()).catch(() => undefined);
+      reject(new Error('rnnoise-init-timeout'));
+    }, timeoutMs);
+    build.then(
+      (handle) => {
+        if (settled) {
+          handle.stop();
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(handle);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 

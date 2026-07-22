@@ -36,14 +36,17 @@ test('two clients connect by link and receive each other audio', async ({ browse
     host.getByTitle('Войти в звонок').click(),
     guest.getByTitle('Войти в звонок').click(),
   ]);
-  await expect(host.getByText('Друг в голосовом звонке')).toBeVisible({ timeout: 15_000 });
-  await expect(guest.getByText('Друг в голосовом звонке')).toBeVisible({ timeout: 15_000 });
+  // Entering a call spins up RNNoise (a ~2 MB WASM AudioWorklet) in both
+  // contexts and then renegotiates the audio m-line. On a shared CI runner
+  // that whole path is much slower than on a dev box, so allow generous headroom.
+  await expect(host.getByText('Друг в голосовом звонке')).toBeVisible({ timeout: 45_000 });
+  await expect(guest.getByText('Друг в голосовом звонке')).toBeVisible({ timeout: 45_000 });
   await expect.poll(() => host.locator('audio').evaluate((element) => {
     const track = (element as HTMLAudioElement).srcObject instanceof MediaStream
       ? ((element as HTMLAudioElement).srcObject as MediaStream).getAudioTracks()[0]
       : undefined;
     return Boolean(track && track.readyState === 'live' && !track.muted);
-  }), { timeout: 20_000 }).toBe(true);
+  }), { timeout: 45_000 }).toBe(true);
   await host.getByTitle('Свернуть звонок').click();
   await expect(host.locator('.call-bar')).toBeVisible();
   await expect(host.locator('.call-stage')).toHaveCount(0);

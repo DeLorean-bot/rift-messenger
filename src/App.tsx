@@ -54,6 +54,9 @@ type PendingTransfer = {
 
 const MAX_FILE_SIZE = 8 * 1024 * 1024;
 const FILE_CHUNK_SIZE = 12 * 1024;
+// Bound RNNoise WASM/AudioWorklet startup so a slow WebView or an underpowered
+// machine falls back to browser suppression instead of stalling call start.
+const RNNOISE_START_TIMEOUT_MS = 8_000;
 const WEBRTC_UNAVAILABLE_MESSAGE = 'Это встроенное окно не поддерживает WebRTC. Открой http://localhost:5173 в Chrome или Edge либо запусти Windows-приложение RIFT.';
 
 const servers = [
@@ -528,7 +531,7 @@ function App() {
           rawMicTrackRef.current = capturedTrack;
           if (noiseSuppressionOn) {
             try {
-              rnnoiseRef.current = await createRnnoiseTrack(capturedTrack);
+              rnnoiseRef.current = await createRnnoiseTrack(capturedTrack, RNNOISE_START_TIMEOUT_MS);
               track = rnnoiseRef.current.track;
             } catch (rnnoiseError) {
               console.warn('[RIFT] RNNoise unavailable, using browser suppression', rnnoiseError);
@@ -604,7 +607,7 @@ function App() {
         await rawTrack.applyConstraints({ noiseSuppression: true }).catch(() => undefined);
       } else {
         await rawTrack.applyConstraints({ noiseSuppression: false }).catch(() => undefined);
-        rnnoiseRef.current = await createRnnoiseTrack(rawTrack);
+        rnnoiseRef.current = await createRnnoiseTrack(rawTrack, RNNOISE_START_TIMEOUT_MS);
         nextTrack = rnnoiseRef.current.track;
       }
       nextTrack.enabled = enabled;
