@@ -28,6 +28,7 @@ import {
   UserPlus,
   Video,
   Volume2,
+  VolumeX,
   Waves,
   X,
 } from 'lucide-react';
@@ -133,6 +134,8 @@ function App() {
   const [remoteAudioOn, setRemoteAudioOn] = useState(false);
   const [localSpeaking, setLocalSpeaking] = useState(false);
   const [remoteSpeaking, setRemoteSpeaking] = useState(false);
+  const [remoteVolume, setRemoteVolume] = useLocalStorageState('rift.remoteVolume', 1);
+  const [deafened, setDeafened] = useState(false);
   const [remoteVideoOn, setRemoteVideoOn] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
   const [callMinimized, setCallMinimized] = useState(false);
@@ -711,6 +714,12 @@ function App() {
     }
   }, [outputDeviceId, callOpen]);
 
+  // Per-participant volume + deafen: scale the remote audio element output.
+  useEffect(() => {
+    const element = remoteAudioRef.current;
+    if (element) element.volume = deafened ? 0 : Math.min(1, remoteVolume);
+  }, [remoteVolume, deafened, callOpen, remoteAudioOn]);
+
   // Active-speaker detection for the local mic (drives the "you're talking" ring).
   useEffect(() => {
     if (!callOpen) {
@@ -1129,6 +1138,7 @@ function App() {
             <div><span className={remoteSpeaking ? 'voice-dot active' : 'voice-dot'} /><strong>Голосовой звонок</strong><small>{remoteSpeaking ? 'друг говорит' : (remoteAudioOn ? 'друг в звонке' : 'ожидаем друга')}</small></div>
             <div className="call-bar-controls">
               <button onClick={toggleMic} className={micOn ? 'enabled' : ''} title={micOn ? 'Выключить микрофон' : 'Включить микрофон'}>{micOn ? <Mic /> : <MicOff />}</button>
+              <button onClick={() => setDeafened((value) => !value)} className={deafened ? 'danger' : ''} title={deafened ? 'Включить звук друга' : 'Заглушить друга'}>{deafened ? <VolumeX /> : <Volume2 />}</button>
               <button onClick={() => void toggleNoiseSuppression()} className={noiseSuppressionOn ? 'enabled accent' : ''} title={`RNNoise: ${noiseSuppressionOn ? 'включён' : 'выключен'}`}><Waves /></button>
               <button onClick={() => { void refreshAudioDevices(); setAudioModalOpen(true); }} title="Настройки звука"><Sliders /></button>
               <button onClick={() => setCallMinimized(false)} title="Развернуть звонок"><Maximize2 /></button>
@@ -1159,6 +1169,7 @@ function App() {
             <div className="call-controls">
               <button onClick={toggleMic} className={(pttEnabled ? (micOn && pttActive) : micOn) ? 'enabled' : ''} title={pttEnabled ? 'Push-to-talk активен (пробел)' : (micOn ? 'Выключить микрофон' : 'Включить микрофон')}>{(pttEnabled ? (micOn && pttActive) : micOn) ? <Mic /> : <MicOff />}</button>
               <button onClick={() => void toggleNoiseSuppression()} className={noiseSuppressionOn ? 'enabled accent' : ''} title={`Шумоподавление RNNoise: ${noiseSuppressionOn ? 'включено' : 'выключено'}`}><Waves /></button>
+              <button onClick={() => setDeafened((value) => !value)} className={deafened ? 'danger' : ''} title={deafened ? 'Включить звук друга' : 'Заглушить друга'}>{deafened ? <VolumeX /> : <Volume2 />}</button>
               <button onClick={toggleCamera} className={cameraOn ? 'enabled' : ''}>{cameraOn ? <Camera /> : <CameraOff />}</button>
               <button onClick={toggleScreen} className={sharing ? 'enabled accent' : ''}><MonitorUp /></button>
               <button onClick={() => { void refreshAudioDevices(); setAudioModalOpen(true); }} title="Настройки звука"><Sliders /></button>
@@ -1269,6 +1280,9 @@ function App() {
 
             <label className="field-label" htmlFor="mic-gain"><Sliders size={15} /> Громкость микрофона · {Math.round(micGain * 100)}%</label>
             <input id="mic-gain" type="range" min={0} max={2} step={0.05} value={micGain} onChange={(event) => changeMicGain(Number(event.target.value))} className="gain-slider" />
+
+            <label className="field-label" htmlFor="friend-volume"><Volume2 size={15} /> Громкость друга · {deafened ? 'заглушено' : `${Math.round(remoteVolume * 100)}%`}</label>
+            <input id="friend-volume" type="range" min={0} max={1} step={0.05} value={remoteVolume} onChange={(event) => setRemoteVolume(Number(event.target.value))} className="gain-slider" disabled={deafened} />
 
             <div className="toggle-row">
               <button type="button" onClick={() => void toggleNoiseSuppression()} className={noiseSuppressionOn ? 'toggle-pill on' : 'toggle-pill'}><Waves size={15} /> RNNoise {noiseSuppressionOn ? 'вкл' : 'выкл'}</button>
