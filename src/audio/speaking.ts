@@ -3,6 +3,8 @@ export type SpeakingMonitorOptions = {
   threshold?: number;
   /** How long the stream must stay quiet before "stopped speaking" fires (ms). */
   releaseMs?: number;
+  /** Optional live input level (smoothed 0-100), for meters and thresholds. */
+  onLevel?: (level: number) => void;
 };
 
 // A single shared AudioContext backs every speaking monitor. AudioContexts are
@@ -57,6 +59,7 @@ export function createSpeakingMonitor(
   let quietSince = 0;
   let raf = 0;
   let stopped = false;
+  let smoothLevel = 0;
 
   const tick = () => {
     if (stopped) return;
@@ -67,6 +70,12 @@ export function createSpeakingMonitor(
       sum += centered * centered;
     }
     const rms = Math.sqrt(sum / samples.length);
+    if (options.onLevel) {
+      // Map RMS (~0-70 in practice) to 0-100 and smooth for a steady meter.
+      const target = Math.min(100, (rms / 45) * 100);
+      smoothLevel += (target - smoothLevel) * (target > smoothLevel ? 0.5 : 0.12);
+      options.onLevel(smoothLevel);
+    }
     const now = performance.now();
     if (rms > threshold) {
       quietSince = 0;

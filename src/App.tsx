@@ -131,8 +131,15 @@ function App() {
   const [micGain, setMicGain] = useLocalStorageState('rift.micGain', 1);
   const [inputDeviceId, setInputDeviceId] = useLocalStorageState('rift.micDevice', '');
   const [outputDeviceId, setOutputDeviceId] = useLocalStorageState('rift.speaker', '');
-  const [pttEnabled, setPttEnabled] = useLocalStorageState('rift.ptt', false);
+  const [inputMode, setInputMode] = useLocalStorageState<'voice' | 'ptt'>('rift.inputMode', 'voice');
   const [pttActive, setPttActive] = useState(false);
+  const [vadAuto, setVadAuto] = useLocalStorageState('rift.vadAuto', true);
+  const [vadThreshold, setVadThreshold] = useLocalStorageState('rift.vadThreshold', 14);
+  const [echoCancellation, setEchoCancellation] = useLocalStorageState('rift.aec', true);
+  const [autoGain, setAutoGain] = useLocalStorageState('rift.agc', true);
+  const [micTestOn, setMicTestOn] = useState(false);
+  const [inputLevel, setInputLevel] = useState(0);
+  const pttEnabled = inputMode === 'ptt';
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
   const [audioModalOpen, setAudioModalOpen] = useState(false);
@@ -575,9 +582,9 @@ function App() {
       const stream = localStreamRef.current || new MediaStream();
       const media = await navigator.mediaDevices.getUserMedia({
         audio: kind === 'mic' && !stream.getAudioTracks().length ? {
-          autoGainControl: true,
+          autoGainControl: autoGain,
           channelCount: 1,
-          echoCancellation: true,
+          echoCancellation,
           noiseSuppression: !noiseSuppressionOn,
           sampleRate: 48000,
           ...(inputDeviceId ? { deviceId: { exact: inputDeviceId } } : {}),
@@ -652,17 +659,33 @@ function App() {
     sendCallState(next, cameraOn || sharing);
   };
 
-  // Keep the send-side audio track muted/unmuted from derived state so that
-  // push-to-talk, the mic button, and RNNoise toggling all stay consistent.
+  // Keep the send-side audio track gated from derived state: push-to-talk
+  // transmits while the key is held; voice-activation transmits while local
+  // voice is detected (localSpeaking, measured on the always-live raw mic).
   useEffect(() => {
     const track = localStreamRef.current?.getAudioTracks()[0];
     if (!track) return;
-    track.enabled = pttEnabled ? (micOn && pttActive) : micOn;
-  }, [micOn, pttEnabled, pttActive, callOpen]);
+    track.enabled = micOn && (pttEnabled ? pttActive : localSpeaking);
+  }, [micOn, pttEnabled, pttActive, localSpeaking, callOpen]);
 
   const changeMicGain = (value: number) => {
     setMicGain(value);
     micPipelineRef.current?.setGain(value);
+  };
+
+  const changeEchoCancellation = (value: boolean) => {
+    setEchoCancellation(value);
+    void rawMicTrackRef.current?.applyConstraints({ echoCancellation: value }).catch(() => undefined);
+  };
+
+  const changeAutoGain = (value: boolean) => {
+    setAutoGain(value);
+    void rawMicTrackRef.current?.applyConstraints({ autoGainControl: value }).catch(() => undefined);
+  };
+
+  const closeAudioModal = () => {
+    setAudioModalOpen(false);
+    setMicTestOn(false);
   };
 
   const toggleNoiseSuppression = async () => {
@@ -725,23 +748,55 @@ function App() {
     if (element) element.volume = deafened ? 0 : Math.min(1, remoteVolume);
   }, [remoteVolume, deafened, callOpen, remoteAudioOn]);
 
-  // Active-speaker detection for the local mic (drives the "you're talking" ring).
+  // Voice-activity detection on the always-live raw mic (before the send gate,
+  // to avoid a mute->silence->stay-muted deadlock). Drives both the transmit
+  // gate in voice mode and the "you're talking" ring, plus the live level meter.
   useEffect(() => {
     if (!callOpen) {
       setLocalSpeaking(false);
       return;
     }
-    const track = localStreamRef.current?.getAudioTracks()[0];
-    if (!track) {
+    const raw = rawMicTrackRef.current;
+    if (!raw) {
       setLocalSpeaking(false);
       return;
     }
-    const stop = createSpeakingMonitor(new MediaStream([track]), setLocalSpeaking);
+    const stop = createSpeakingMonitor(new MediaStream([raw]), setLocalSpeaking, {
+      threshold: (vadAuto ? 12 : vadThreshold) * 0.45,
+      onLevel: setInputLevel,
+    });
     return () => {
       stop();
       setLocalSpeaking(false);
+      setInputLevel(0);
     };
-  }, [callOpen, micOn, inputDeviceId, noiseSuppressionOn]);
+  }, [callOpen, micOn, inputDeviceId, noiseSuppressionOn, vadAuto, vadThreshold]);
+
+  // Standalone mic test (level meter) for the settings panel when not in a call.
+  useEffect(() => {
+    if (!micTestOn || (callOpen && rawMicTrackRef.current)) return;
+    let stopped = false;
+    let stopMonitor = () => undefined as void;
+    let testStream: MediaStream | null = null;
+    navigator.mediaDevices.getUserMedia({
+      audio: {
+        autoGainControl: autoGain,
+        echoCancellation,
+        noiseSuppression: false,
+        ...(inputDeviceId ? { deviceId: { exact: inputDeviceId } } : {}),
+      },
+    }).then((stream) => {
+      if (stopped) { stream.getTracks().forEach((track) => track.stop()); return; }
+      testStream = stream;
+      stopMonitor = createSpeakingMonitor(stream, () => undefined, { threshold: 999, onLevel: setInputLevel });
+    }).catch(() => setError('Не удалось открыть микрофон для проверки'));
+    return () => {
+      stopped = true;
+      stopMonitor();
+      testStream?.getTracks().forEach((track) => track.stop());
+      setInputLevel(0);
+    };
+  }, [micTestOn, callOpen, inputDeviceId, echoCancellation, autoGain]);
 
   // Active-speaker detection for the remote peer (drives the "friend talking" ring).
   useEffect(() => {
@@ -790,9 +845,9 @@ function App() {
     try {
       const media = await navigator.mediaDevices.getUserMedia({
         audio: {
-          autoGainControl: true,
+          autoGainControl: autoGain,
           channelCount: 1,
-          echoCancellation: true,
+          echoCancellation,
           noiseSuppression: !noiseSuppressionOn,
           sampleRate: 48000,
           ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
@@ -1256,44 +1311,96 @@ function App() {
       )}
 
       {audioModalOpen && (
-        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setAudioModalOpen(false)}>
-          <div className="small-modal audio-modal">
-            <button type="button" className="modal-close" onClick={() => setAudioModalOpen(false)}><X size={20} /></button>
-            <div className="modal-kicker">НАСТРОЙКИ ЗВУКА</div>
-            <h2>Микрофон и звук</h2>
+        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeAudioModal()}>
+          <div className="voice-settings">
+            <button type="button" className="modal-close" onClick={closeAudioModal}><X size={20} /></button>
+            <div className="modal-kicker">ГОЛОС И ВИДЕО</div>
+            <h2>Настройки голоса</h2>
 
-            <label className="field-label" htmlFor="audio-input"><Mic size={15} /> Микрофон</label>
+            <div className="vs-grid">
+              <div>
+                <label className="field-label" htmlFor="audio-input"><Mic size={15} /> Микрофон</label>
+                <div className="named-input select">
+                  <select id="audio-input" value={inputDeviceId} onChange={(event) => void changeInputDevice(event.target.value)}>
+                    <option value="">По умолчанию</option>
+                    {audioInputs.map((device, index) => (
+                      <option key={device.deviceId || index} value={device.deviceId}>{device.label || `Микрофон ${index + 1}`}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="field-label" htmlFor="audio-output"><Volume2 size={15} /> Динамик</label>
+                <div className="named-input select">
+                  <select id="audio-output" value={outputDeviceId} onChange={(event) => setOutputDeviceId(event.target.value)}>
+                    <option value="">По умолчанию</option>
+                    {audioOutputs.map((device, index) => (
+                      <option key={device.deviceId || index} value={device.deviceId}>{device.label || `Динамик ${index + 1}`}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="vs-grid">
+              <div>
+                <label className="field-label" htmlFor="mic-gain">Громкость микрофона · {Math.round(micGain * 100)}%</label>
+                <input id="mic-gain" type="range" min={0} max={2} step={0.05} value={micGain} onChange={(event) => changeMicGain(Number(event.target.value))} className="gain-slider" />
+              </div>
+              <div>
+                <label className="field-label" htmlFor="friend-volume">Громкость друга · {deafened ? 'заглушено' : `${Math.round(remoteVolume * 100)}%`}</label>
+                <input id="friend-volume" type="range" min={0} max={1} step={0.05} value={remoteVolume} onChange={(event) => setRemoteVolume(Number(event.target.value))} className="gain-slider" disabled={deafened} />
+              </div>
+            </div>
+
+            <div className="vs-mictest">
+              <button type="button" className={micTestOn ? 'vs-test-btn on' : 'vs-test-btn'} onClick={() => setMicTestOn((value) => !value)}>{micTestOn ? 'Остановить' : 'Проверка микрофона'}</button>
+              <div className="vs-meter"><span style={{ width: `${Math.round(inputLevel)}%` }} className={inputLevel > (vadAuto ? 12 : vadThreshold) ? 'over' : ''} /></div>
+            </div>
+            <p className="field-hint">Скажи что-нибудь — если полоска доходит до порога, тебя слышно.</p>
+
+            <div className="vs-section-title">Режим ввода</div>
+            <div className="vs-modes">
+              <button type="button" className={inputMode === 'voice' ? 'vs-mode on' : 'vs-mode'} onClick={() => setInputMode('voice')}>
+                <strong>Активация по голосу</strong><span>Микрофон открывается, когда ты говоришь</span>
+              </button>
+              <button type="button" className={inputMode === 'ptt' ? 'vs-mode on' : 'vs-mode'} onClick={() => setInputMode('ptt')}>
+                <strong>Рация (push-to-talk)</strong><span>Говоришь, пока держишь пробел</span>
+              </button>
+            </div>
+
+            {inputMode === 'voice' && (
+              <div className="vs-block">
+                <div className="vs-toggle-line">
+                  <span>Автоматически определять чувствительность</span>
+                  <button type="button" className={vadAuto ? 'vs-switch on' : 'vs-switch'} onClick={() => setVadAuto((value) => !value)} aria-pressed={vadAuto}><i /></button>
+                </div>
+                {!vadAuto && (
+                  <>
+                    <label className="field-label" htmlFor="vad-threshold">Чувствительность · порог {vadThreshold}</label>
+                    <input id="vad-threshold" type="range" min={0} max={80} step={1} value={vadThreshold} onChange={(event) => setVadThreshold(Number(event.target.value))} className="gain-slider" />
+                  </>
+                )}
+              </div>
+            )}
+
+            <div className="vs-section-title">Обработка звука</div>
+            <label className="field-label" htmlFor="ns-mode">Шумоподавление</label>
             <div className="named-input select">
-              <select id="audio-input" value={inputDeviceId} onChange={(event) => void changeInputDevice(event.target.value)}>
-                <option value="">По умолчанию</option>
-                {audioInputs.map((device, index) => (
-                  <option key={device.deviceId || index} value={device.deviceId}>{device.label || `Микрофон ${index + 1}`}</option>
-                ))}
+              <select id="ns-mode" value={noiseSuppressionOn ? 'rnnoise' : 'off'} onChange={(event) => { if ((event.target.value === 'rnnoise') !== noiseSuppressionOn) void toggleNoiseSuppression(); }}>
+                <option value="rnnoise">RNNoise (рекомендуется)</option>
+                <option value="off">Выключено</option>
               </select>
             </div>
-
-            <label className="field-label" htmlFor="audio-output"><Volume2 size={15} /> Вывод звука</label>
-            <div className="named-input select">
-              <select id="audio-output" value={outputDeviceId} onChange={(event) => setOutputDeviceId(event.target.value)}>
-                <option value="">По умолчанию</option>
-                {audioOutputs.map((device, index) => (
-                  <option key={device.deviceId || index} value={device.deviceId}>{device.label || `Динамик ${index + 1}`}</option>
-                ))}
-              </select>
+            <div className="vs-toggle-line">
+              <span>Эхоподавление</span>
+              <button type="button" className={echoCancellation ? 'vs-switch on' : 'vs-switch'} onClick={() => changeEchoCancellation(!echoCancellation)} aria-pressed={echoCancellation}><i /></button>
             </div>
-            {audioOutputs.length === 0 && <p className="field-hint">Выбор вывода станет доступен после первого входа в звонок (нужны разрешения на устройства).</p>}
-
-            <label className="field-label" htmlFor="mic-gain"><Sliders size={15} /> Громкость микрофона · {Math.round(micGain * 100)}%</label>
-            <input id="mic-gain" type="range" min={0} max={2} step={0.05} value={micGain} onChange={(event) => changeMicGain(Number(event.target.value))} className="gain-slider" />
-
-            <label className="field-label" htmlFor="friend-volume"><Volume2 size={15} /> Громкость друга · {deafened ? 'заглушено' : `${Math.round(remoteVolume * 100)}%`}</label>
-            <input id="friend-volume" type="range" min={0} max={1} step={0.05} value={remoteVolume} onChange={(event) => setRemoteVolume(Number(event.target.value))} className="gain-slider" disabled={deafened} />
-
-            <div className="toggle-row">
-              <button type="button" onClick={() => void toggleNoiseSuppression()} className={noiseSuppressionOn ? 'toggle-pill on' : 'toggle-pill'}><Waves size={15} /> RNNoise {noiseSuppressionOn ? 'вкл' : 'выкл'}</button>
-              <button type="button" onClick={() => setPttEnabled((value) => !value)} className={pttEnabled ? 'toggle-pill on' : 'toggle-pill'}><Radio size={15} /> Push-to-talk {pttEnabled ? 'вкл' : 'выкл'}</button>
+            <div className="vs-toggle-line">
+              <span>Автоматическая регулировка усиления</span>
+              <button type="button" className={autoGain ? 'vs-switch on' : 'vs-switch'} onClick={() => changeAutoGain(!autoGain)} aria-pressed={autoGain}><i /></button>
             </div>
-            <p className="field-hint">{pttEnabled ? 'Микрофон молчит, пока не удерживаешь пробел (не срабатывает при вводе текста).' : 'Микрофон открыт постоянно, пока включён в звонке.'}</p>
+            <p className="field-hint">Эхо/AGC применяются к текущему звонку сразу; полностью — при следующем входе в звонок.</p>
           </div>
         </div>
       )}
