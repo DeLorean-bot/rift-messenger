@@ -42,6 +42,122 @@ RIFT — настольный мессенджер в духе Discord для н
 
 Локальному trusted-агенту разрешено использовать приватный signing key по указанному пути для сборки и загрузки GitHub secret. Нельзя печатать содержимое ключа в ответах, логах, source-файлах или коммитах. Папка `.tauri` находится вне проекта, а `.gitignore` дополнительно исключает `*.key` и `*.key.pub`.
 
+## Полная карта исходников Buzz
+
+Референсный проект находится здесь:
+
+`C:\Users\FSOS\Desktop\buzz-main`
+
+Это полный исходный код Block Buzz примерно на 2940 файлов: Rust backend/relay, Tauri desktop, web/mobile clients, тесты, deployment, scripts, agent skills и документация. Лицензия Apache-2.0. Следующему агенту разрешено читать и использовать совместимые идеи/код с сохранением attribution, но нельзя бездумно переносить серверные зависимости в P2P RIFT.
+
+### Главные инструкции и документация
+
+- `AGENTS.md` — обязательные правила работы с репозиторием Buzz. Прочитать полностью перед изменением или глубоким анализом Buzz.
+- `ARCHITECTURE.md` — полная архитектура relay, Nostr events, Postgres/Redis, subscriptions, security и crates.
+- `README.md` — продукт и общий запуск.
+- `desktop\README.md` — запуск и устройство desktop-клиента.
+- `TESTING.md` — тестовая стратегия.
+- `RELEASING.md` — релизный процесс Buzz.
+- `NOSTR.md` и `docs\nips\` — используемые Nostr-протоколы и кастомные NIP.
+- `VISION*.md` — долгосрочные направления продукта; это идеи, а не готовые функции.
+- `docs\BUZZ_AUDIT.md` внутри RIFT — уже подготовленный вывод, что можно переносить.
+
+### Skills для агентов
+
+Buzz кладёт одинаковые ссылки на skills сразу для нескольких систем:
+
+- `.agents\skills\desktop-screenshot\SKILL.md`
+- `.agents\skills\sprout-cli\SKILL.md`
+- `.claude\skills\desktop-screenshot\SKILL.md`
+- `.claude\skills\sprout-cli\SKILL.md`
+- `.codex\skills\desktop-screenshot\SKILL.md`
+- `.codex\skills\sprout-cli\SKILL.md`
+- `.goose\skills\desktop-screenshot\SKILL.md`
+- `.goose\skills\sprout-cli\SKILL.md`
+
+Это не восемь разных skills. Это копии/файлы-указатели на два настоящих документа:
+
+- `desktop\src-tauri\src\managed_agents\screenshot_skill.md` — Playwright screenshots для Buzz и публикация картинок в GitHub PR через `scripts\post-screenshots.sh`.
+- `desktop\src-tauri\src\managed_agents\nest_skill.md` — инструкция Buzz CLI: сообщения, каналы, DM, workflows, agents, repos и memory через Buzz relay.
+
+Также есть:
+
+- `examples\meadow-core\skills\github-research\SKILL.md` — skill исследования GitHub для демонстрационного agent workspace.
+- `desktop\src-tauri\src\managed_agents\nest_agents.md` — инструкции управляемым агентам.
+
+Skills `desktop-screenshot` и `sprout-cli` привязаны к инфраструктуре Buzz. Они полезны как образец организации агентных инструкций, но не запускают и не тестируют RIFT напрямую. Следующий агент не должен объявлять их частью RIFT или пытаться вызвать `buzz` без настроенного `BUZZ_PRIVATE_KEY`/relay.
+
+### Основные папки исходников
+
+- `desktop\` — главный Tauri/React desktop-клиент Buzz. Самый полезный референс для RIFT.
+- `desktop\src\features\` — функциональные React-модули. Всего около 1092 TS/TSX файлов.
+- `desktop\src-tauri\` — Rust/Tauri команды, huddle audio backend, managed-agent instructions и desktop integration.
+- `crates\` — около 308 Rust-файлов: relay, core protocol, auth, database, media, search, CLI, workflows, agents и другие серверные компоненты.
+- `web\` — web-клиент/веб-части.
+- `mobile\` — мобильный клиент.
+- `admin-web\` — административный интерфейс.
+- `scripts\` и `script\` — автоматизация разработки, release, screenshots, проверки и миграции.
+- `deploy\` — Docker/Compose/Helm deployment.
+- `migrations\` — миграции серверной базы данных.
+- `schema\` — схемы данных/протоколов.
+- `examples\` — примеры агентов, CLI и Meadow workspace.
+- `bench\`, `benchmarks\`, `perf\` — нагрузочные и performance-исследования.
+- `patches\` — патчи сторонних зависимостей.
+
+### Полезные desktop features
+
+- `desktop\src\features\huddle\` — голосовые комнаты, start/join/leave lifecycle, audio devices, mic gain, PTT, active speaker, reconnect и compact HuddleBar.
+- `desktop\src\features\messages\` — timeline, composer, drafts, reply/edit/delete, reactions, attachments, typing, threads, pagination и unread state.
+- `desktop\src\features\sidebar\` — серверная/канальная навигация, starred/muted/unread, sections, drag-and-drop и connection/update cards.
+- `desktop\src\features\notifications\` — desktop notifications, sounds, per-event preferences, badges и localStorage validation.
+- `desktop\src\features\settings\` — updater, themes, shortcuts, notification/audio/profile settings.
+- `desktop\src\features\channels\` — каналы и channel state.
+- `desktop\src\features\communities\` — workspace/community switching и relay probing.
+- `desktop\src\features\profile\` — profile/avatar/status UI.
+- `desktop\src\features\search\` — поиск.
+- `desktop\src\features\onboarding\` — onboarding и recovery screens.
+- `desktop\src\features\moderation\`, `forum\`, `reminders\`, `custom-emoji\`, `presence\` — будущие продуктовые референсы.
+- `agents\`, `agent-memory\`, `projects\`, `workflows\`, `mesh-compute\`, `pulse\` — агентная платформа Buzz; не является текущей целью RIFT.
+
+### Самые полезные конкретные файлы
+
+- `desktop\src\features\huddle\HuddleContext.tsx` — лучший референс voice lifecycle, cleanup token и bounded reconnect.
+- `desktop\src\features\huddle\components\HuddleBar.tsx` — компактная панель звонка.
+- `desktop\src\features\huddle\components\MicControls.tsx` — устройства, mute, gain и PTT controls.
+- `desktop\src\features\huddle\lib\audioWorklet.ts` — AudioWorklet lifecycle; у Buzz он передаёт PCM в Rust, а не делает WebRTC/RNNoise.
+- `desktop\src\features\huddle\lib\useAudioDevices.ts` — enumeration и смена микрофона.
+- `desktop\src\features\messages\useTypingBroadcast.ts` — typing throttle раз в три секунды.
+- `desktop\src\features\messages\ui\MessageActionBar.tsx` — действия сообщения и focus-management.
+- `desktop\src\features\sidebar\ui\AppSidebar.tsx` — структура sidebar.
+- `desktop\src\features\notifications\hooks.ts` — безопасное хранение notification settings.
+- `desktop\src\features\settings\hooks\use-updater.ts` — guards для check/download/install и background update interval.
+- `desktop\src\features\settings\ui\KeyboardShortcutsCard.tsx` — отображение shortcuts.
+- `desktop\public\worklet.js` — worklet Buzz для PCM/PTT, если нужен дополнительный аудиореференс.
+
+### Scripts, которые стоит изучить
+
+- `scripts\post-screenshots.sh` — публикация immutable screenshots для PR.
+- `scripts\check-pr-image-urls.sh` — проверка ссылок на изображения.
+- `desktop\scripts\` — desktop build/test/screenshot helpers.
+- `Justfile` — список основных project commands; перед запуском команды посмотреть соответствующий recipe.
+- `.github\workflows\` — CI/release patterns Buzz.
+
+Не копировать scripts вслепую: большинство ожидает pnpm workspace, `just`, Buzz mock bridge, GitHub CLI, Rust monorepo или работающий Buzz relay.
+
+### Что из Buzz уже применено в RIFT
+
+- Явный вход в voice вместо автоматического включения.
+- Stable refs и строгая очистка media resources.
+- Защита от устаревших WebRTC handlers/negotiation.
+- Сворачиваемый compact call bar.
+- Grace period для краткого disconnect.
+- Updater state machine и blocking update UI.
+- План следующих функций: devices/gain/PTT, bounded reconnect, typing/drafts/reactions/unread.
+
+### Главное архитектурное отличие
+
+Buzz не является serverless/P2P-приложением. Его relay — единственный источник истины; сервер использует Rust, Postgres, Redis, WebSocket fan-out, media storage и собственную передачу huddle audio. RIFT использует Buzz как дизайн и reliability reference, но связь RIFT остаётся WebRTC P2P. Копирование `buzz-relay`, database, Redis или Rust huddle transport нарушит требование пользователя «без платного центрального сервера».
+
 ## Что уже сделано
 
 - Tauri 2 + React/Vite Windows-приложение.
