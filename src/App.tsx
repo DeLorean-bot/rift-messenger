@@ -34,6 +34,7 @@ import {
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { createMicPipeline, type MicPipeline } from './audio/micPipeline';
+import { createSpeakingMonitor } from './audio/speaking';
 import { AttachmentView } from './AttachmentView';
 import { base64ToBytes, bytesToBase64, saveAttachment } from './files';
 import { Onboarding } from './Onboarding';
@@ -130,6 +131,8 @@ function App() {
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
   const [audioModalOpen, setAudioModalOpen] = useState(false);
   const [remoteAudioOn, setRemoteAudioOn] = useState(false);
+  const [localSpeaking, setLocalSpeaking] = useState(false);
+  const [remoteSpeaking, setRemoteSpeaking] = useState(false);
   const [remoteVideoOn, setRemoteVideoOn] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
   const [callMinimized, setCallMinimized] = useState(false);
@@ -708,6 +711,37 @@ function App() {
     }
   }, [outputDeviceId, callOpen]);
 
+  // Active-speaker detection for the local mic (drives the "you're talking" ring).
+  useEffect(() => {
+    if (!callOpen) {
+      setLocalSpeaking(false);
+      return;
+    }
+    const track = localStreamRef.current?.getAudioTracks()[0];
+    if (!track) {
+      setLocalSpeaking(false);
+      return;
+    }
+    const stop = createSpeakingMonitor(new MediaStream([track]), setLocalSpeaking);
+    return () => {
+      stop();
+      setLocalSpeaking(false);
+    };
+  }, [callOpen, micOn, inputDeviceId, noiseSuppressionOn]);
+
+  // Active-speaker detection for the remote peer (drives the "friend talking" ring).
+  useEffect(() => {
+    if (!callOpen || !remoteAudioOn) {
+      setRemoteSpeaking(false);
+      return;
+    }
+    const stop = createSpeakingMonitor(remoteStreamRef.current, setRemoteSpeaking);
+    return () => {
+      stop();
+      setRemoteSpeaking(false);
+    };
+  }, [callOpen, remoteAudioOn]);
+
   // Push-to-talk: while enabled, Space (outside text fields) unmutes the mic.
   useEffect(() => {
     if (!callOpen || !pttEnabled) {
@@ -1092,7 +1126,7 @@ function App() {
 
         {callOpen && callMinimized && (
           <section className="call-bar">
-            <div><span className={remoteAudioOn ? 'voice-dot active' : 'voice-dot'} /><strong>Голосовой звонок</strong><small>{remoteAudioOn ? 'друг говорит' : 'ожидаем друга'}</small></div>
+            <div><span className={remoteSpeaking ? 'voice-dot active' : 'voice-dot'} /><strong>Голосовой звонок</strong><small>{remoteSpeaking ? 'друг говорит' : (remoteAudioOn ? 'друг в звонке' : 'ожидаем друга')}</small></div>
             <div className="call-bar-controls">
               <button onClick={toggleMic} className={micOn ? 'enabled' : ''} title={micOn ? 'Выключить микрофон' : 'Включить микрофон'}>{micOn ? <Mic /> : <MicOff />}</button>
               <button onClick={() => void toggleNoiseSuppression()} className={noiseSuppressionOn ? 'enabled accent' : ''} title={`RNNoise: ${noiseSuppressionOn ? 'включён' : 'выключен'}`}><Waves /></button>
@@ -1108,12 +1142,12 @@ function App() {
             <div className="video-grid">
               <div className="video-tile remote">
                 <video ref={remoteVideoRef} autoPlay muted playsInline />
-                {!remoteVideoOn && <div className="video-empty"><div className="orb">?</div><span>{remoteAudioOn ? 'Друг в голосовом звонке' : 'Ожидаем друга в звонке'}</span></div>}
+                {!remoteVideoOn && <div className="video-empty"><div className={remoteSpeaking ? 'orb speaking' : 'orb'}>?</div><span>{remoteAudioOn ? 'Друг в голосовом звонке' : 'Ожидаем друга в звонке'}</span></div>}
                 <span className="video-label">Собеседник</span>
               </div>
               <div className="video-tile local">
                 <video ref={localVideoRef} autoPlay muted playsInline />
-                {!cameraOn && !sharing && <div className="video-empty"><div className="orb own">Я</div></div>}
+                {!cameraOn && !sharing && <div className="video-empty"><div className={localSpeaking ? 'orb own speaking' : 'orb own'}>Я</div></div>}
                 <span className="video-label">{profileName} {sharing && '· экран'}</span>
               </div>
             </div>
