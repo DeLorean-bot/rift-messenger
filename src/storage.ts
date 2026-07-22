@@ -1,5 +1,7 @@
 import { Dispatch, SetStateAction, useEffect, useState } from 'react';
 
+export type MessageStatus = 'sent' | 'delivered' | 'read';
+
 export type Message = {
   id: string;
   author: string;
@@ -7,6 +9,11 @@ export type Message = {
   time: string;
   own?: boolean;
   attachment?: Attachment;
+  status?: MessageStatus;
+  replyTo?: { id: string; author: string; text: string };
+  reactions?: Record<string, string[]>;
+  edited?: boolean;
+  deleted?: boolean;
 };
 
 export type Attachment = {

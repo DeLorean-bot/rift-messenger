@@ -1,6 +1,26 @@
 # RIFT handoff
 
-Дата: 2026-07-22
+Дата: 2026-07-23
+
+## ⚡ МИГРАЦИЯ НА ELECTRON (2026-07-23)
+
+**Десктоп-оболочка переведена с Tauri 2 (Rust) на Electron.** Причина: Discord-паритет,
+в первую очередь in-app пикер демонстрации экрана — он работает через `desktopCapturer`,
+которого нет в WebView2 (Tauri), но который есть в Electron из коробки.
+
+- Новая оболочка: `electron/main.cjs` (окно, `rift://` deep links, `desktopCapturer` IPC,
+  electron-updater) + `electron/preload.cjs` (безопасный мост `window.riftDesktop`).
+- Фронт (`src/`) перенесён без изменений логики; `@tauri-apps/*` убраны, updater и deep links
+  теперь через Electron IPC (`src/useMandatoryUpdater.ts`, deep-link effect в `App.tsx`).
+- Screen share: `src/desktopCapture.ts` + пикер в `App.tsx` — окна/мониторы с превью,
+  разрешение до 1440p, 15/30/60 fps, кодек H264/VP9/AV1, звук приложения, смена качества на лету
+  (`chromeMediaSource` + `setParameters`). Проверено: `desktopCapturer.getSources` вернул 12 источников с PNG-превью.
+- Installer/релиз: `electron-builder` (NSIS + GitHub publish) + `electron-updater`. Workflow
+  `.github/workflows/release.yml` обновлён. **Старый Tauri-minisign updater и его secret больше не применяются.**
+- `src-tauri/` удалён. Команды: `npm run desktop:dev` (Electron dev), `npm run desktop:build` (installer).
+- Проверено: `npm run build` PASS, `npm run test:e2e` PASS, Electron-окно грузит фронт без ошибок.
+- НЕ доделано: локальная сборка/публикация Electron-installer через electron-builder ещё не прогонялась
+  до конца (конфиг готов, CI-workflow готов) — нужно прогнать `npm run desktop:build` и релиз.
 
 ## Что это вообще за приложение
 
@@ -10,7 +30,7 @@ RIFT — настольный мессенджер в духе Discord для н
 
 ## На чём строится RIFT
 
-- **Tauri 2 + Rust** — нативное Windows-окно, installer, deep links и безопасные подписанные обновления.
+- **Electron** — нативное Windows-окно, installer (electron-builder), `rift://` deep links, экранный захват (`desktopCapturer`) и подписанные обновления (electron-updater). (Ранее был Tauri 2 — см. секцию миграции выше.)
 - **React 18 + TypeScript + Vite** — интерфейс.
 - **WebRTC** — прямые DTLS-SRTP аудио/видео/screen-share соединения и RTCDataChannel для сообщений/файлов.
 - **Nostr public relays** — только временный rendezvous/signaling для коротких приглашений; содержимое offer/answer дополнительно шифруется секретом из ссылки.

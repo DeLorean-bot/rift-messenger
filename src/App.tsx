@@ -36,6 +36,8 @@ import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useSta
 import { QRCodeSVG } from 'qrcode.react';
 import { createMicPipeline, type MicPipeline } from './audio/micPipeline';
 import { createSpeakingMonitor } from './audio/speaking';
+import { captureScreenSource, bitrateForQuality, RESOLUTION_PRESETS, FPS_PRESETS, type ScreenQuality } from './desktopCapture';
+import type { DesktopSource } from './types/rift-desktop';
 import { AttachmentView } from './AttachmentView';
 import { base64ToBytes, bytesToBase64, saveAttachment } from './files';
 import { Onboarding } from './Onboarding';
@@ -143,6 +145,14 @@ function App() {
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
   const [audioModalOpen, setAudioModalOpen] = useState(false);
+  const [screenPickerOpen, setScreenPickerOpen] = useState(false);
+  const [screenSources, setScreenSources] = useState<DesktopSource[]>([]);
+  const [screenTab, setScreenTab] = useState<'window' | 'screen'>('window');
+  const [screenLoading, setScreenLoading] = useState(false);
+  const [screenQuality, setScreenQuality] = useLocalStorageState<ScreenQuality>('rift.screenQuality', { height: 1080, fps: 30, audio: true });
+  const [screenCodec, setScreenCodec] = useLocalStorageState<'auto' | 'VP9' | 'H264' | 'AV1'>('rift.screenCodec', 'auto');
+  const screenSourceIdRef = useRef<string | null>(null);
+  const screenAudioSenderRef = useRef<RTCRtpSender | null>(null);
   const [remoteAudioOn, setRemoteAudioOn] = useState(false);
   const [localSpeaking, setLocalSpeaking] = useState(false);
   const [remoteSpeaking, setRemoteSpeaking] = useState(false);
@@ -890,38 +900,139 @@ function App() {
     sendCallState(micOn, track.enabled || sharing);
   };
 
-  const toggleScreen = async () => {
-    if (sharing) {
-      screenStreamRef.current?.getTracks().forEach((track) => track.stop());
-      screenStreamRef.current = null;
-      const cameraTrack = localStreamRef.current?.getVideoTracks()[0] || null;
-      const videoSender = pcRef.current?.getTransceivers().find((item) => item.receiver.track.kind === 'video')?.sender;
-      if (videoSender) await videoSender.replaceTrack(cameraTrack);
-      if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
-      setSharing(false);
-      sendCallState(micOn, cameraOn);
-      return;
+  const videoTransceiver = () =>
+    pcRef.current?.getTransceivers().find((item) => item.receiver.track.kind === 'video');
+
+  const applyVideoBitrate = async (quality: ScreenQuality) => {
+    const sender = videoTransceiver()?.sender;
+    if (!sender) return;
+    const params = sender.getParameters();
+    if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+    params.encodings[0].maxBitrate = bitrateForQuality(quality);
+    params.encodings[0].maxFramerate = quality.fps;
+    await sender.setParameters(params).catch(() => undefined);
+  };
+
+  const applyCodecPreference = () => {
+    if (screenCodec === 'auto') return;
+    const transceiver = videoTransceiver();
+    const caps = RTCRtpSender.getCapabilities?.('video');
+    if (!transceiver || !transceiver.setCodecPreferences || !caps) return;
+    const needle = screenCodec.toLowerCase();
+    const preferred = caps.codecs.filter((codec) => codec.mimeType.toLowerCase().includes(needle));
+    const rest = caps.codecs.filter((codec) => !codec.mimeType.toLowerCase().includes(needle));
+    if (preferred.length) {
+      try { transceiver.setCodecPreferences([...preferred, ...rest]); } catch { /* unsupported */ }
     }
+  };
+
+  const stopScreenShare = async () => {
+    screenStreamRef.current?.getTracks().forEach((track) => track.stop());
+    screenStreamRef.current = null;
+    screenSourceIdRef.current = null;
+    const cameraTrack = localStreamRef.current?.getVideoTracks()[0] || null;
+    await videoTransceiver()?.sender.replaceTrack(cameraTrack);
+    if (screenAudioSenderRef.current && pcRef.current) {
+      await screenAudioSenderRef.current.replaceTrack(null).catch(() => undefined);
+      try { pcRef.current.removeTrack(screenAudioSenderRef.current); } catch { /* already gone */ }
+      screenAudioSenderRef.current = null;
+      await renegotiateMedia();
+    }
+    if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
+    setSharing(false);
+    sendCallState(micOn, cameraOn);
+  };
+
+  const startScreenShare = async (sourceId: string) => {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      const stream = await captureScreenSource(sourceId, screenQuality);
       screenStreamRef.current = stream;
-      const track = stream.getVideoTracks()[0];
-      const sender = pcRef.current?.getTransceivers().find((item) => item.receiver.track.kind === 'video')?.sender;
-      const transceiver = pcRef.current?.getTransceivers().find((item) => item.receiver.track.kind === 'video');
+      screenSourceIdRef.current = sourceId;
+      const videoTrack = stream.getVideoTracks()[0];
+      const transceiver = videoTransceiver();
       if (transceiver) {
         transceiver.direction = 'sendrecv';
-        await transceiver.sender.replaceTrack(track);
+        applyCodecPreference();
+        await transceiver.sender.replaceTrack(videoTrack);
+      } else if (pcRef.current) {
+        pcRef.current.addTrack(videoTrack, stream);
       }
-      else if (pcRef.current) pcRef.current.addTrack(track, stream);
+      const audioTrack = stream.getAudioTracks()[0];
+      if (audioTrack && pcRef.current) {
+        screenAudioSenderRef.current = pcRef.current.addTrack(audioTrack, stream);
+      }
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       setSharing(true);
       setCallOpen(true);
       await renegotiateMedia();
+      await applyVideoBitrate(screenQuality);
       sendCallState(micOn, true);
-      track.onended = () => setSharing(false);
+      videoTrack.onended = () => void stopScreenShare();
     } catch {
-      setError('Демонстрация экрана отменена');
+      setError('Не удалось начать демонстрацию экрана');
     }
+  };
+
+  const openScreenPicker = async () => {
+    const desktop = window.riftDesktop;
+    if (!desktop) {
+      // Browser fallback: no in-app picker, use the OS getDisplayMedia dialog.
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: screenQuality.audio });
+        screenStreamRef.current = stream;
+        const track = stream.getVideoTracks()[0];
+        const transceiver = videoTransceiver();
+        if (transceiver) { transceiver.direction = 'sendrecv'; await transceiver.sender.replaceTrack(track); }
+        else if (pcRef.current) pcRef.current.addTrack(track, stream);
+        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+        setSharing(true);
+        setCallOpen(true);
+        await renegotiateMedia();
+        sendCallState(micOn, true);
+        track.onended = () => setSharing(false);
+      } catch {
+        setError('Демонстрация экрана отменена');
+      }
+      return;
+    }
+    setScreenLoading(true);
+    setScreenPickerOpen(true);
+    try {
+      const sources = await desktop.getDesktopSources({ thumbnailSize: { width: 320, height: 180 } });
+      setScreenSources(sources);
+    } catch {
+      setError('Не удалось получить список окон для демонстрации');
+    }
+    setScreenLoading(false);
+  };
+
+  const pickScreenSource = async (sourceId: string) => {
+    setScreenPickerOpen(false);
+    await startScreenShare(sourceId);
+  };
+
+  const changeScreenQuality = async (next: ScreenQuality) => {
+    setScreenQuality(next);
+    if (!sharing || !screenSourceIdRef.current || !window.riftDesktop) return;
+    // Re-capture at the new resolution/fps and hot-swap the track (no renegotiation).
+    try {
+      const stream = await captureScreenSource(screenSourceIdRef.current, next);
+      const previous = screenStreamRef.current;
+      screenStreamRef.current = stream;
+      const videoTrack = stream.getVideoTracks()[0];
+      await videoTransceiver()?.sender.replaceTrack(videoTrack);
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      await applyVideoBitrate(next);
+      previous?.getVideoTracks().forEach((track) => track.stop());
+      videoTrack.onended = () => void stopScreenShare();
+    } catch {
+      setError('Не удалось сменить качество демонстрации');
+    }
+  };
+
+  const toggleScreen = async () => {
+    if (sharing) { await stopScreenShare(); return; }
+    await openScreenPicker();
   };
 
   const hangUp = () => {
@@ -1081,21 +1192,16 @@ function App() {
   }, [attachCallStreams, callMinimized, callOpen]);
 
   useEffect(() => {
-    if (!('__TAURI_INTERNALS__' in window)) return undefined;
-    let unlisten: undefined | (() => void);
-    const openLinks = (urls: string[]) => {
-      const link = urls.find((url) => url.startsWith('rift://join/'));
-      if (!link || handledLinksRef.current.has(link)) return;
-      handledLinksRef.current.add(link);
+    const desktop = window.riftDesktop;
+    if (!desktop) return undefined;
+    const openLink = (url: string) => {
+      if (!url.startsWith('rift://join/') || handledLinksRef.current.has(url)) return;
+      handledLinksRef.current.add(url);
       setSignalOpen(true);
-      setLinkDraft(link);
-      void joinFromLink(link);
+      setLinkDraft(url);
+      void joinFromLink(url);
     };
-    void import('@tauri-apps/plugin-deep-link').then(async ({ getCurrent, onOpenUrl }) => {
-      openLinks((await getCurrent()) || []);
-      unlisten = await onOpenUrl(openLinks);
-    });
-    return () => unlisten?.();
+    return desktop.onDeepLink(openLink);
   }, []);
 
   useEffect(() => () => {
@@ -1307,6 +1413,60 @@ function App() {
             <p className="field-hint">Имя хранится локально и отправляется собеседнику вместе с сообщением.</p>
             <button className="primary-action" disabled={!profileDraft.trim()}>Сохранить профиль</button>
           </form>
+        </div>
+      )}
+
+      {screenPickerOpen && (
+        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setScreenPickerOpen(false)}>
+          <div className="screen-picker">
+            <button type="button" className="modal-close" onClick={() => setScreenPickerOpen(false)}><X size={20} /></button>
+            <div className="modal-kicker">ДЕМОНСТРАЦИЯ ЭКРАНА</div>
+            <h2>Что показать другу?</h2>
+
+            <div className="sp-tabs">
+              <button type="button" className={screenTab === 'window' ? 'sp-tab on' : 'sp-tab'} onClick={() => setScreenTab('window')}>Приложения</button>
+              <button type="button" className={screenTab === 'screen' ? 'sp-tab on' : 'sp-tab'} onClick={() => setScreenTab('screen')}>Весь экран</button>
+            </div>
+
+            <div className="sp-grid">
+              {screenLoading && <div className="sp-empty">Загружаю источники…</div>}
+              {!screenLoading && screenSources.filter((source) => (screenTab === 'screen' ? source.isScreen : !source.isScreen)).map((source) => (
+                <button type="button" key={source.id} className="sp-source" onClick={() => void pickScreenSource(source.id)}>
+                  <img className="sp-thumb" src={source.thumbnail} alt="" />
+                  <span className="sp-source-name">{source.appIcon && <img className="sp-icon" src={source.appIcon} alt="" />}<span>{source.name}</span></span>
+                </button>
+              ))}
+              {!screenLoading && screenSources.filter((source) => (screenTab === 'screen' ? source.isScreen : !source.isScreen)).length === 0 && (
+                <div className="sp-empty">Нет доступных источников</div>
+              )}
+            </div>
+
+            <div className="sp-quality">
+              <label className="field-label">Разрешение</label>
+              <div className="sp-chips">
+                {RESOLUTION_PRESETS.map((height) => (
+                  <button type="button" key={height} className={screenQuality.height === height ? 'sp-chip on' : 'sp-chip'} onClick={() => void changeScreenQuality({ ...screenQuality, height })}>{height}p</button>
+                ))}
+              </div>
+              <label className="field-label">Кадры в секунду</label>
+              <div className="sp-chips">
+                {FPS_PRESETS.map((fps) => (
+                  <button type="button" key={fps} className={screenQuality.fps === fps ? 'sp-chip on' : 'sp-chip'} onClick={() => void changeScreenQuality({ ...screenQuality, fps })}>{fps} fps</button>
+                ))}
+              </div>
+              <label className="field-label">Кодек видео</label>
+              <div className="sp-chips">
+                {(['auto', 'H264', 'VP9', 'AV1'] as const).map((codec) => (
+                  <button type="button" key={codec} className={screenCodec === codec ? 'sp-chip on' : 'sp-chip'} onClick={() => setScreenCodec(codec)}>{codec === 'auto' ? 'Авто' : codec}</button>
+                ))}
+              </div>
+              <div className="vs-toggle-line">
+                <span>Транслировать звук приложения</span>
+                <button type="button" className={screenQuality.audio ? 'vs-switch on' : 'vs-switch'} onClick={() => setScreenQuality({ ...screenQuality, audio: !screenQuality.audio })} aria-pressed={screenQuality.audio}><i /></button>
+              </div>
+              <p className="field-hint">Разрешение/fps можно менять на лету во время трансляции. Кодек и звук применяются при следующем запуске.</p>
+            </div>
+          </div>
         </div>
       )}
 

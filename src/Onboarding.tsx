@@ -6,7 +6,7 @@ type OnboardingProps = {
 };
 
 export function Onboarding({ onClose, onConnect }: OnboardingProps) {
-  const desktop = '__TAURI_INTERNALS__' in window;
+  const desktop = Boolean(window.riftDesktop) || '__TAURI_INTERNALS__' in window;
 
   return (
     <div className="modal-backdrop onboarding-backdrop">

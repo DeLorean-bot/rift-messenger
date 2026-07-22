@@ -345,6 +345,33 @@ button { border: 0; background: none; cursor: pointer; }
 .vs-switch.on { background: var(--acid); }
 .vs-switch.on i { transform: translateX(18px); }
 
+/* Discord-style screen-share picker */
+.screen-picker {
+  width: min(760px, 100%); max-height: 88vh; overflow-y: auto; background: #13181f;
+  border: 1px solid #2b333d; border-radius: 16px; box-shadow: 0 35px 100px rgba(0,0,0,.6);
+  padding: 28px; position: relative; animation: modal-in .25s ease-out;
+}
+.screen-picker h2 { margin: 8px 0 16px; font: 600 20px 'Unbounded'; letter-spacing: -.8px; }
+.sp-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.sp-tab { height: 34px; padding: 0 16px; border-radius: 9px; background: #0b0e12; border: 1px solid #303943; color: #8f99a5; font-size: 12px; font-weight: 600; cursor: pointer; }
+.sp-tab.on { background: var(--acid); border-color: var(--acid); color: #10140c; }
+.sp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; max-height: 40vh; overflow-y: auto; padding: 2px; }
+.sp-source { display: flex; flex-direction: column; gap: 6px; padding: 6px; border-radius: 11px; border: 1px solid #303943; background: #0b0e12; cursor: pointer; transition: border-color .12s, transform .08s; text-align: left; }
+.sp-source:hover { border-color: var(--acid); }
+.sp-source:active { transform: translateY(1px); }
+.sp-thumb { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 7px; background: #05070a; }
+.sp-source-name { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #d3d9e0; overflow: hidden; }
+.sp-source-name > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-icon { width: 16px; height: 16px; flex-shrink: 0; border-radius: 3px; }
+.sp-empty { grid-column: 1/-1; text-align: center; color: #646f7b; font-size: 12px; padding: 28px 0; }
+.sp-quality { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 16px; }
+.sp-quality .field-label { margin: 14px 0 8px; }
+.sp-quality .field-label:first-of-type { margin-top: 0; }
+.sp-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.sp-chip { height: 32px; padding: 0 14px; border-radius: 8px; background: #0b0e12; border: 1px solid #303943; color: #8f99a5; font-size: 12px; font-weight: 600; cursor: pointer; }
+.sp-chip.on { background: var(--acid); border-color: var(--acid); color: #10140c; }
+.screen-picker .vs-toggle-line { margin-top: 16px; }
+
 /* Legacy audio modal bits reused by the voice panel */
 .audio-modal .field-label { display: flex; align-items: center; gap: 6px; margin-top: 16px; }
 .audio-modal .field-label:first-of-type { margin-top: 4px; }

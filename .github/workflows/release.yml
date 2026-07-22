@@ -17,20 +17,13 @@ jobs:
         with:
           node-version: lts/*
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './src-tauri -> target'
       - run: npm ci
       - run: npm run test:e2e -- --reporter=line
-      - uses: tauri-apps/tauri-action@v1
+      # Build the Vite frontend with relative asset paths for file:// loading.
+      - run: npm run build
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: v__VERSION__
-          releaseName: 'RIFT v__VERSION__'
-          releaseBody: 'Свежая обязательная версия RIFT. Скачай RIFT___VERSION___x64-setup.exe или дождись автообновления.'
-          releaseDraft: false
-          prerelease: false
+          ELECTRON: '1'
+      # Package + publish the Electron installer + latest.yml to GitHub Releases.
+      - run: npx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

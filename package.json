@@ -1,24 +1,38 @@
 {
   "name": "rift-messenger",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.6.0",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test:e2e": "playwright test",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build"
+    "electron:dev": "concurrently -k -n vite,electron \"vite --port 5173 --strictPort\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
+    "electron:build": "cross-env ELECTRON=1 npm run build && electron-builder",
+    "desktop:dev": "concurrently -k -n vite,electron \"vite --port 5173 --strictPort\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
+    "desktop:build": "cross-env ELECTRON=1 npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "io.rift.messenger",
+    "productName": "RIFT",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": ["dist/**/*", "electron/**/*", "package.json"],
+    "protocols": [{ "name": "RIFT", "schemes": ["rift"] }],
+    "win": { "target": ["nsis"], "icon": "build/icon.ico" },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "RIFT"
+    },
+    "publish": [{ "provider": "github", "owner": "DeLorean-bot", "repo": "rift-messenger" }]
   },
   "dependencies": {
     "@jitsi/rnnoise-wasm": "^0.2.1",
-    "@tauri-apps/api": "^2.8.0",
-    "@tauri-apps/plugin-deep-link": "^2.4.9",
-    "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.1",
     "@zxing/browser": "^0.2.1",
+    "electron-updater": "^6.8.9",
     "fflate": "^0.8.3",
     "lucide-react": "^0.468.0",
     "nostr-tools": "^2.24.1",
@@ -28,11 +42,15 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
-    "@tauri-apps/cli": "^2.8.0",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^10.0.3",
+    "cross-env": "^10.1.0",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
     "typescript": "^5.7.2",
-    "vite": "^6.0.5"
+    "vite": "^6.0.5",
+    "wait-on": "^9.1.0"
   }
 }
