@@ -63,17 +63,14 @@ RIFT — настольный мессенджер в духе Discord для н
 
 ## Что не успел / делать следующим
 
-1. Прогнать `npm run test:e2e` после добавления RNNoise. До RNNoise тест проходил. Если AudioWorklet не стартует в fake-audio Edge, проверить console/pageerror и URL emitted worklet asset.
-2. Почистить отладочный код в `tests\voice-call.spec.ts`: убрать Proxy/лишние console/stats dumps, оставить проверки live remote audio.
-3. Проверить RNNoise на настоящем микрофоне в Tauri Windows-приложении: toggle on/off, mute, hangup, повторный вход. Особое внимание — чтобы raw mic и processed track всегда останавливались.
-4. Добавить устройства input/output, mic gain и push-to-talk по паттернам Buzz.
-5. Добавить bounded ICE restart/reconnect. Сейчас есть только grace period.
-6. Инициализировать отдельный git-репозиторий ВНУТРИ `rift-messenger` (`git init -b main`). Родительский `C:\Users\FSOS\Documents\Lua` уже является другим git repo; не коммитить проект в родительский случайно.
-7. Создать публичный GitHub repo `DeLorean-bot/rift-messenger`, добавить remote, commit/push.
-8. `gh` CLI на машине отсутствовал. Нужно установить и авторизовать либо создать repo через GitHub UI. GitHub connector видел аккаунт `DeLorean-bot`, но его API не умел создавать repo/release.
-9. В GitHub Actions добавить secret `TAURI_SIGNING_PRIVATE_KEY` из файла `C:\Users\FSOS\.tauri\rift.key`. Сам приватный ключ никогда не коммитить. Password пустой; workflow сейчас ссылается также на `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, можно задать пустое значение или убрать reference после проверки.
-10. Сделать tag `v0.5.0` и push. Workflow должен собрать release assets и `latest.json`.
-11. Собрать локальный подписанный installer 0.5.0 и проверить install/update. Пример:
+1. Проверить RNNoise на настоящем микрофоне в Tauri Windows-приложении: toggle on/off, mute, hangup, повторный вход. Особое внимание — чтобы raw mic и processed track всегда останавливались.
+2. Добавить устройства input/output, mic gain и push-to-talk по паттернам Buzz.
+3. Добавить bounded ICE restart/reconnect. Сейчас есть только grace period.
+4. Создать публичный GitHub repo `DeLorean-bot/rift-messenger`, добавить remote и push. Отдельный локальный repo уже инициализирован внутри `rift-messenger` на ветке `main`.
+5. `gh` CLI на машине отсутствовал. Нужно установить и авторизовать либо создать repo через GitHub UI. GitHub connector видел аккаунт `DeLorean-bot`, но его API не умел создавать repo/release.
+6. В GitHub Actions добавить secret `TAURI_SIGNING_PRIVATE_KEY` из файла `C:\Users\FSOS\.tauri\rift.key`. Сам приватный ключ никогда не коммитить. Password пустой; workflow сейчас ссылается также на `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, можно задать пустое значение или убрать reference после проверки.
+7. Сделать tag `v0.5.0` и push. Workflow должен собрать release assets и `latest.json`.
+8. Собрать локальный подписанный installer 0.5.0 и проверить install/update. Пример:
 
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY_PATH='C:\Users\FSOS\.tauri\rift.key'
@@ -82,8 +79,7 @@ $env:CARGO_TARGET_DIR='C:\Users\FSOS\Documents\Lua\rift-messenger\src-tauri\targ
 npm run desktop:build
 ```
 
-12. Проверить, что `src-tauri\Cargo.lock` показывает package version 0.5.0 после `cargo check`/build.
-13. Старый installer 0.4.0 нельзя удалённо заблокировать: в нём updater ещё не существовал. Обязительное обновление начинает работать только с 0.5.0.
+9. Старый installer 0.4.0 нельзя удалённо заблокировать: в нём updater ещё не существовал. Обязительное обновление начинает работать только с 0.5.0.
 
 ## Важное про “без серверов”
 
@@ -106,10 +102,16 @@ npm run desktop:dev
 ## Текущий статус проверки
 
 - `npm run build`: PASS после RNNoise.
-- `cargo check`: PASS до последней RNNoise frontend-правки (Rust не затронут).
-- `npm run test:e2e`: PASS до RNNoise; после RNNoise ещё не запускался.
+- `cargo check`: PASS; Cargo.lock обновлён на rift-messenger 0.5.0.
+- `npm run test:e2e`: PASS после RNNoise. Один первый прогон упал из-за временного обрыва публичного signaling relay; повторный полный прогон подтвердил двусторонний live audio через RNNoise. Диагностический Proxy и stats-логи из теста удалены.
 - Windows installer 0.5.0: ещё не собран.
 - GitHub repo/release: ещё не создан.
+
+## Готовый промпт следующему агенту
+
+```text
+Продолжай разработку RIFT в C:\Users\FSOS\Documents\Lua\rift-messenger. Сначала полностью прочитай HANDOFF.md и docs\BUZZ_AUDIT.md, затем самостоятельно проверь фактическое состояние Git и файлов — не полагайся слепо на описание. Не удаляй готовые функции и не меняй P2P-архитектуру без причины. Сначала запусти npm run build, cargo check --manifest-path src-tauri\Cargo.toml и npm run test:e2e. Исправь найденные ошибки. Затем продолжай незавершённые пункты из HANDOFF по порядку: GitHub-репозиторий DeLorean-bot/rift-messenger, secrets для Tauri signing key, GitHub Releases updater, подписанный installer 0.5.0 и проверка обновления. Приватный ключ разрешено использовать локально из C:\Users\FSOS\.tauri\rift.key, но запрещено печатать, коммитить или класть в логи его содержимое. После каждого крупного изменения снова проверяй build/E2E и обновляй HANDOFF фактическим статусом.
+```
 
 ## Лицензии
 
