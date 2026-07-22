@@ -63,6 +63,11 @@ const RNNOISE_START_TIMEOUT_MS = 8_000;
 // Bounded ICE restart: how many times to renegotiate ICE over the still-open
 // data channel before declaring the direct route unrecoverable.
 const MAX_ICE_RESTARTS = 4;
+// Delivery receipts only ever move forward: sent -> delivered -> read.
+const STATUS_RANK: Record<string, number> = { sent: 0, delivered: 1, read: 2 };
+const mergeStatus = (current: string | undefined, next: string) =>
+  (STATUS_RANK[next] ?? 0) >= (STATUS_RANK[current ?? 'sent'] ?? 0) ? next : current;
+const TYPING_THROTTLE_MS = 3_000;
 const WEBRTC_UNAVAILABLE_MESSAGE = 'Это встроенное окно не поддерживает WebRTC. Открой http://localhost:5173 в Chrome или Edge либо запусти Windows-приложение RIFT.';
 
 const servers = [
@@ -1150,15 +1155,15 @@ function App() {
         {callOpen && !callMinimized && (
           <section className="call-stage">
             <div className="video-grid">
-              <div className="video-tile remote">
+              <div className={remoteSpeaking && !remoteVideoOn ? 'video-tile remote speaking' : 'video-tile remote'}>
                 <video ref={remoteVideoRef} autoPlay muted playsInline />
                 {!remoteVideoOn && <div className="video-empty"><div className={remoteSpeaking ? 'orb speaking' : 'orb'}>?</div><span>{remoteAudioOn ? 'Друг в голосовом звонке' : 'Ожидаем друга в звонке'}</span></div>}
-                <span className="video-label">Собеседник</span>
+                <span className="video-label">{deafened ? <VolumeX size={12} /> : null}Собеседник</span>
               </div>
-              <div className="video-tile local">
+              <div className={localSpeaking && !cameraOn && !sharing ? 'video-tile local speaking' : 'video-tile local'}>
                 <video ref={localVideoRef} autoPlay muted playsInline />
                 {!cameraOn && !sharing && <div className="video-empty"><div className={localSpeaking ? 'orb own speaking' : 'orb own'}>Я</div></div>}
-                <span className="video-label">{profileName} {sharing && '· экран'}</span>
+                <span className="video-label">{(pttEnabled ? !(micOn && pttActive) : !micOn) ? <MicOff size={12} /> : null}{profileName}{sharing && ' · экран'}</span>
               </div>
             </div>
             {pttEnabled && (
