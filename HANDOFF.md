@@ -66,7 +66,7 @@ RIFT — настольный мессенджер в духе Discord для н
 1. Проверить RNNoise на настоящем микрофоне в Tauri Windows-приложении: toggle on/off, mute, hangup, повторный вход. Особое внимание — чтобы raw mic и processed track всегда останавливались.
 2. Добавить устройства input/output, mic gain и push-to-talk по паттернам Buzz.
 3. Добавить bounded ICE restart/reconnect. Сейчас есть только grace period.
-4. Дождаться и проверить GitHub Actions run `29956660831`: `https://github.com/DeLorean-bot/rift-messenger/actions/runs/29956660831`. Публичный repo, remote, `main`, tag `v0.5.0` и push уже сделаны. На момент handoff workflow находился в `npm ci`.
+4. GitHub Actions run `29956660831` упал на `npm run test:e2e`; `npm ci` прошёл, Tauri build был пропущен. Публичный signaling иногда флейкает (локально первый RNNoise-прогон тоже оборвался, повторный прошёл). В Playwright config добавлено `retries: process.env.CI ? 2 : 0`. Запусти workflow вручную через `workflow_dispatch` с актуального `main`; простой rerun старого job использует старый tag SHA без этого исправления.
 5. Если release workflow упадёт на подписи, проверить GitHub secret `TAURI_SIGNING_PRIVATE_KEY` из файла `C:\Users\FSOS\.tauri\rift.key`. Сам приватный ключ никогда не коммитить. Password пустой; workflow также ссылается на `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 6. После успешного workflow проверить release assets, `latest.json`, скачивание installer и обновление установленной программы.
 7. При необходимости собрать локальный подписанный installer 0.5.0. Пример:
@@ -104,13 +104,13 @@ npm run desktop:dev
 - `cargo check`: PASS; Cargo.lock обновлён на rift-messenger 0.5.0.
 - `npm run test:e2e`: PASS после RNNoise. Один первый прогон упал из-за временного обрыва публичного signaling relay; повторный полный прогон подтвердил двусторонний live audio через RNNoise. Диагностический Proxy и stats-логи из теста удалены.
 - GitHub repo: `https://github.com/DeLorean-bot/rift-messenger`, public, `main` синхронизирован.
-- GitHub release `v0.5.0`: workflow запущен и ещё выполнялся; готового release на момент проверки не было.
+- GitHub release `v0.5.0`: первый workflow run упал на E2E до Tauri build; готового release нет. CI retry fix уже запушен в `main`, нужен новый manual workflow run.
 - Windows installer 0.5.0: локально ещё не проверен; GitHub workflow собирает его.
 
 ## Готовый промпт следующему агенту
 
 ```text
-Продолжай разработку RIFT в C:\Users\FSOS\Documents\Lua\rift-messenger. Сначала полностью прочитай HANDOFF.md и docs\BUZZ_AUDIT.md, затем самостоятельно проверь фактическое состояние Git и файлов — не полагайся слепо на описание. Не удаляй готовые функции и не меняй P2P-архитектуру без причины. Сначала проверь GitHub Actions run 29956660831 и release v0.5.0, затем запусти npm run build, cargo check --manifest-path src-tauri\Cargo.toml и npm run test:e2e. Исправь найденные ошибки. Доведи GitHub Releases updater, подписанный installer 0.5.0 и реальную проверку обновления. Приватный ключ разрешено использовать локально из C:\Users\FSOS\.tauri\rift.key, но запрещено печатать, коммитить или класть в логи его содержимое. После каждого крупного изменения снова проверяй build/E2E и обновляй HANDOFF фактическим статусом.
+Продолжай разработку RIFT в C:\Users\FSOS\Documents\Lua\rift-messenger. Сначала полностью прочитай HANDOFF.md и docs\BUZZ_AUDIT.md, затем самостоятельно проверь фактическое состояние Git и файлов — не полагайся слепо на описание. Не удаляй готовые функции и не меняй P2P-архитектуру без причины. GitHub Actions run 29956660831 упал на публично-сетевом E2E; retry fix уже в main. Сначала запусти Publish RIFT вручную через workflow_dispatch с актуального main и проследи до готового release. Также запусти npm run build, cargo check --manifest-path src-tauri\Cargo.toml и npm run test:e2e. Исправь найденные ошибки. Доведи GitHub Releases updater, подписанный installer 0.5.0 и реальную проверку обновления. Приватный ключ разрешено использовать локально из C:\Users\FSOS\.tauri\rift.key, но запрещено печатать, коммитить или класть в логи его содержимое. После каждого крупного изменения снова проверяй build/E2E и обновляй HANDOFF фактическим статусом.
 ```
 
 ## Лицензии

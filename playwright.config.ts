@@ -4,6 +4,9 @@ export default defineConfig({
   testDir: './tests',
   timeout: 60_000,
   fullyParallel: false,
+  // Pairing intentionally exercises public Nostr relays. A relay can be
+  // temporarily slow even when the product and WebRTC path are healthy.
+  retries: process.env.CI ? 2 : 0,
   use: {
     baseURL: 'http://127.0.0.1:4174',
     channel: 'msedge',
