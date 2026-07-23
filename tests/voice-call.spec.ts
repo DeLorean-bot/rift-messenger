@@ -51,6 +51,18 @@ test('two clients connect by link and receive each other audio', async ({ browse
   await expect(host.locator('.call-bar')).toBeVisible();
   await expect(host.locator('.call-stage')).toHaveCount(0);
 
+  // Text pillar: typing indicator, delivery receipt, reactions over the data channel.
+  const hostComposer = host.getByPlaceholder(/Сообщение в #/);
+  await hostComposer.fill('привет это тест');
+  await expect(guest.getByText('Собеседник печатает…')).toBeVisible({ timeout: 10_000 });
+  await hostComposer.press('Enter');
+  await expect(guest.getByText('привет это тест')).toBeVisible({ timeout: 10_000 });
+  await expect(host.locator('.msg-status')).toBeVisible({ timeout: 10_000 });
+
+  await guest.getByText('привет это тест').hover();
+  await guest.locator('.msg-action.emoji').first().click();
+  await expect(host.locator('.reaction-chip')).toBeVisible({ timeout: 10_000 });
+
   await hostContext.close();
   await guestContext.close();
 });

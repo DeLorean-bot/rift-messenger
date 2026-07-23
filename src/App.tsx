@@ -3,8 +3,10 @@ import {
   Camera,
   CameraOff,
   Check,
+  CheckCheck,
   CircleHelp,
   Copy,
+  CornerUpLeft,
   Download,
   Hash,
   Headphones,
@@ -15,6 +17,7 @@ import {
   Minimize2,
   MonitorUp,
   Paperclip,
+  Pencil,
   PhoneOff,
   Plus,
   Radio,
@@ -24,6 +27,7 @@ import {
   Settings,
   Sliders,
   Sparkles,
+  Trash2,
   Users,
   UserPlus,
   Video,
@@ -111,6 +115,14 @@ function App() {
   const [messagesByChannel, setMessagesByChannel] = useLocalStorageState<Record<string, Message[]>>('rift.messages', defaultMessages);
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [draft, setDraft] = useState('');
+  const [replyTo, setReplyTo] = useState<{ id: string; author: string; text: string } | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [remoteTypingChannel, setRemoteTypingChannel] = useState<string | null>(null);
+  const [accentHue, setAccentHue] = useLocalStorageState('rift.accentHue', 78);
+  const [bubbleStyle, setBubbleStyle] = useLocalStorageState('rift.bubbles', false);
+  const typingSentAtRef = useRef(0);
+  const typingClearTimerRef = useRef<number | null>(null);
+  const pendingReadRef = useRef(new Map<string, Set<string>>());
   const [channelModalOpen, setChannelModalOpen] = useState(false);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [newChannelName, setNewChannelName] = useState('');
@@ -236,6 +248,8 @@ function App() {
     try {
       const payload = JSON.parse(event.data) as {
         type: string;
+        id?: string;
+        ids?: string[];
         text?: string;
         author?: string;
         channelId?: string;
@@ -246,6 +260,10 @@ function App() {
         description?: RTCSessionDescriptionInit;
         audio?: boolean;
         video?: boolean;
+        status?: string;
+        emoji?: string;
+        add?: boolean;
+        replyTo?: { id: string; author: string; text: string };
       };
       if (payload.type === 'call-state') {
         setRemoteAudioOn(Boolean(payload.audio));
@@ -282,8 +300,59 @@ function App() {
         await pcRef.current.setRemoteDescription(payload.description);
         return;
       }
+      if (payload.type === 'typing' && payload.channelId) {
+        setRemoteTypingChannel(payload.channelId);
+        if (typingClearTimerRef.current !== null) window.clearTimeout(typingClearTimerRef.current);
+        typingClearTimerRef.current = window.setTimeout(() => setRemoteTypingChannel(null), 6_000);
+        return;
+      }
+      if (payload.type === 'msg-ack' && payload.channelId && payload.status) {
+        const ackIds = new Set(payload.ids || (payload.id ? [payload.id] : []));
+        if (!ackIds.size) return;
+        setMessagesByChannel((all) => ({
+          ...all,
+          [payload.channelId!]: (all[payload.channelId!] || []).map((message) =>
+            ackIds.has(message.id)
+              ? { ...message, status: mergeStatus(message.status, payload.status!) as Message['status'] }
+              : message),
+        }));
+        return;
+      }
+      if (payload.type === 'message-edit' && payload.id && payload.channelId && payload.text) {
+        setMessagesByChannel((all) => ({
+          ...all,
+          [payload.channelId!]: (all[payload.channelId!] || []).map((message) =>
+            message.id === payload.id ? { ...message, text: payload.text!, edited: true } : message),
+        }));
+        return;
+      }
+      if (payload.type === 'message-delete' && payload.id && payload.channelId) {
+        setMessagesByChannel((all) => ({
+          ...all,
+          [payload.channelId!]: (all[payload.channelId!] || []).filter((message) => message.id !== payload.id),
+        }));
+        return;
+      }
+      if (payload.type === 'reaction' && payload.id && payload.channelId && payload.emoji) {
+        const author = payload.author || 'Собеседник';
+        setMessagesByChannel((all) => ({
+          ...all,
+          [payload.channelId!]: (all[payload.channelId!] || []).map((message) => {
+            if (message.id !== payload.id) return message;
+            const reactions = { ...(message.reactions || {}) };
+            const names = new Set(reactions[payload.emoji!] || []);
+            if (payload.add) names.add(author);
+            else names.delete(author);
+            if (names.size) reactions[payload.emoji!] = [...names];
+            else delete reactions[payload.emoji!];
+            return { ...message, reactions };
+          }),
+        }));
+        return;
+      }
       if (payload.type === 'message' && payload.text) {
         const targetId = payload.channelId || activeChannelRef.current;
+        const messageId = payload.id || crypto.randomUUID();
         if (payload.channelName) {
           setChannels((items) => items.some((item) => item.id === targetId)
             ? items
@@ -292,12 +361,25 @@ function App() {
         setMessagesByChannel((all) => ({
           ...all,
           [targetId]: [...(all[targetId] || []), {
-            id: crypto.randomUUID(),
+            id: messageId,
             author: payload.author || 'Собеседник',
             text: payload.text!,
             time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+            replyTo: payload.replyTo,
           }],
         }));
+        setRemoteTypingChannel(null);
+        const visibleNow = targetId === activeChannelRef.current && document.hasFocus();
+        if (channelRef.current?.readyState === 'open') {
+          channelRef.current.send(JSON.stringify({
+            type: 'msg-ack', id: messageId, channelId: targetId, status: visibleNow ? 'read' : 'delivered',
+          }));
+        }
+        if (!visibleNow) {
+          const pending = pendingReadRef.current.get(targetId) || new Set<string>();
+          pending.add(messageId);
+          pendingReadRef.current.set(targetId, pending);
+        }
         if (targetId !== activeChannelRef.current) {
           setUnread((items) => ({ ...items, [targetId]: (items[targetId] || 0) + 1 }));
         }
@@ -1055,29 +1137,126 @@ function App() {
     setCallMinimized(false);
   };
 
+  const sendPacket = (packet: Record<string, unknown>) => {
+    if (channelRef.current?.readyState === 'open') {
+      channelRef.current.send(JSON.stringify(packet));
+      return true;
+    }
+    return false;
+  };
+
+  const handleDraftChange = (value: string) => {
+    setDraft(value);
+    // Discord-style ephemeral typing signal, throttled per channel.
+    const now = Date.now();
+    if (value.trim() && now - typingSentAtRef.current > TYPING_THROTTLE_MS) {
+      typingSentAtRef.current = now;
+      sendPacket({ type: 'typing', channelId: activeChannel.id, author: profileName });
+    }
+  };
+
   const sendMessage = (event: FormEvent) => {
     event.preventDefault();
     const text = draft.trim();
     if (!text) return;
+
+    if (editingId) {
+      setMessagesByChannel((all) => ({
+        ...all,
+        [activeChannel.id]: (all[activeChannel.id] || []).map((message) =>
+          message.id === editingId ? { ...message, text, edited: true } : message),
+      }));
+      sendPacket({ type: 'message-edit', id: editingId, channelId: activeChannel.id, text });
+      setEditingId(null);
+      setDraft('');
+      return;
+    }
+
     const message: Message = {
-      id: crypto.randomUUID(), author: profileName, text, own: true,
+      id: crypto.randomUUID(), author: profileName, text, own: true, status: 'sent',
       time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+      ...(replyTo ? { replyTo } : {}),
     };
     setMessagesByChannel((all) => ({
       ...all,
       [activeChannel.id]: [...(all[activeChannel.id] || []), message],
     }));
-    if (channelRef.current?.readyState === 'open') {
-      channelRef.current.send(JSON.stringify({
-        type: 'message',
-        text,
-        author: profileName,
-        channelId: activeChannel.id,
-        channelName: activeChannel.name,
-      }));
-    }
+    sendPacket({
+      type: 'message',
+      id: message.id,
+      text,
+      author: profileName,
+      channelId: activeChannel.id,
+      channelName: activeChannel.name,
+      ...(replyTo ? { replyTo } : {}),
+    });
+    setReplyTo(null);
     setDraft('');
   };
+
+  const startReply = (message: Message) => {
+    setEditingId(null);
+    setReplyTo({ id: message.id, author: message.author, text: message.text.slice(0, 120) });
+  };
+
+  const startEdit = (message: Message) => {
+    setReplyTo(null);
+    setEditingId(message.id);
+    setDraft(message.text);
+  };
+
+  const cancelComposerExtras = () => {
+    setReplyTo(null);
+    if (editingId) {
+      setEditingId(null);
+      setDraft('');
+    }
+  };
+
+  const deleteMessage = (message: Message) => {
+    setMessagesByChannel((all) => ({
+      ...all,
+      [activeChannel.id]: (all[activeChannel.id] || []).filter((item) => item.id !== message.id),
+    }));
+    sendPacket({ type: 'message-delete', id: message.id, channelId: activeChannel.id });
+  };
+
+  const toggleReaction = (message: Message, emoji: string) => {
+    const names = new Set(message.reactions?.[emoji] || []);
+    const add = !names.has(profileName);
+    if (add) names.add(profileName);
+    else names.delete(profileName);
+    setMessagesByChannel((all) => ({
+      ...all,
+      [activeChannel.id]: (all[activeChannel.id] || []).map((item) => {
+        if (item.id !== message.id) return item;
+        const reactions = { ...(item.reactions || {}) };
+        if (names.size) reactions[emoji] = [...names];
+        else delete reactions[emoji];
+        return { ...item, reactions };
+      }),
+    }));
+    sendPacket({ type: 'reaction', id: message.id, channelId: activeChannel.id, emoji, add, author: profileName });
+  };
+
+  // Appearance: accent hue drives every --acid usage via the CSS variable.
+  useEffect(() => {
+    document.documentElement.style.setProperty('--accent-h', String(accentHue));
+  }, [accentHue]);
+
+  // Flush read receipts when the channel becomes visible (switch or refocus).
+  useEffect(() => {
+    const flushReads = () => {
+      const pending = pendingReadRef.current.get(activeChannelId);
+      if (!pending?.size || !document.hasFocus()) return;
+      if (sendPacket({ type: 'msg-ack', ids: [...pending], channelId: activeChannelId, status: 'read' })) {
+        pendingReadRef.current.delete(activeChannelId);
+      }
+    };
+    flushReads();
+    window.addEventListener('focus', flushReads);
+    return () => window.removeEventListener('focus', flushReads);
+  }, [activeChannelId]);
 
   const waitForChannelBuffer = async (channel: RTCDataChannel) => {
     while (channel.bufferedAmount > 512 * 1024) {
@@ -1345,7 +1524,7 @@ function App() {
           </section>
         )}
 
-        <div className="messages">
+        <div className={bubbleStyle ? 'messages bubbles' : 'messages'}>
           <div className="channel-intro">
             <div className="hash-block"><Hash size={30} /></div>
             <h1>{activeChannel.name}</h1>
@@ -1355,21 +1534,67 @@ function App() {
           {messages.map((message) => (
             <article className={`message ${message.own ? 'own' : ''}`} key={message.id}>
               <div className={`message-avatar ${message.author === 'RIFT' ? 'system' : ''}`}>{message.author.slice(0, 1)}</div>
-              <div>
-                <div className="message-meta"><strong>{message.author}</strong><time>{message.time}</time></div>
+              <div className="message-body">
+                {message.replyTo && (
+                  <div className="reply-ref"><CornerUpLeft size={11} /><strong>{message.replyTo.author}</strong><span>{message.replyTo.text}</span></div>
+                )}
+                <div className="message-meta">
+                  <strong>{message.author}</strong><time>{message.time}</time>
+                  {message.edited && <em className="edited-mark">(изм.)</em>}
+                  {message.own && message.status && (
+                    <span className={`msg-status ${message.status}`} title={message.status === 'read' ? 'Прочитано' : message.status === 'delivered' ? 'Доставлено' : 'Отправлено'}>
+                      {message.status === 'sent' ? <Check size={12} /> : <CheckCheck size={12} />}
+                    </span>
+                  )}
+                </div>
                 {message.text && <p>{message.text}</p>}
                 {message.attachment && <AttachmentView attachment={message.attachment} />}
+                {message.reactions && Object.keys(message.reactions).length > 0 && (
+                  <div className="reactions-row">
+                    {Object.entries(message.reactions).map(([emoji, names]) => (
+                      <button key={emoji} className={names.includes(profileName) ? 'reaction-chip mine' : 'reaction-chip'} title={names.join(', ')} onClick={() => toggleReaction(message, emoji)}>
+                        {emoji} <span>{names.length}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
+              {message.author !== 'RIFT' && (
+                <div className="msg-actions">
+                  {['👍', '❤️', '😂', '🔥'].map((emoji) => (
+                    <button key={emoji} className="msg-action emoji" title={`Реакция ${emoji}`} onClick={() => toggleReaction(message, emoji)}>{emoji}</button>
+                  ))}
+                  <button className="msg-action" title="Ответить" onClick={() => startReply(message)}><CornerUpLeft size={14} /></button>
+                  {message.own && <button className="msg-action" title="Редактировать" onClick={() => startEdit(message)}><Pencil size={13} /></button>}
+                  {message.own && <button className="msg-action danger" title="Удалить" onClick={() => deleteMessage(message)}><Trash2 size={13} /></button>}
+                </div>
+              )}
             </article>
           ))}
           <div ref={messagesEndRef} />
         </div>
 
         {transferLabel && <div className="transfer-status"><span />{transferLabel}</div>}
+        {(replyTo || editingId) && (
+          <div className="composer-extra">
+            {editingId
+              ? <span><Pencil size={12} /> Редактирование сообщения</span>
+              : <span><CornerUpLeft size={12} /> Ответ для <strong>{replyTo!.author}</strong>: {replyTo!.text.slice(0, 60)}</span>}
+            <button type="button" onClick={cancelComposerExtras} title="Отменить"><X size={14} /></button>
+          </div>
+        )}
+        {remoteTypingChannel === activeChannel.id && (
+          <div className="typing-line"><span className="typing-dots"><i /><i /><i /></span> Собеседник печатает…</div>
+        )}
         <form className="composer" onSubmit={sendMessage}>
           <input ref={fileInputRef} className="file-input" type="file" onChange={sendFile} />
           <button type="button" onClick={() => fileInputRef.current?.click()} title="Отправить файл"><Paperclip size={19} /></button>
-          <input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={`Сообщение в #${activeChannel.name}`} />
+          <input
+            value={draft}
+            onChange={(event) => handleDraftChange(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Escape') cancelComposerExtras(); }}
+            placeholder={editingId ? 'Изменить сообщение…' : `Сообщение в #${activeChannel.name}`}
+          />
           <button className="send-button" aria-label="Отправить"><Send size={18} /></button>
         </form>
       </section>
@@ -1411,6 +1636,20 @@ function App() {
             <label className="field-label" htmlFor="profile-name">Отображаемое имя</label>
             <div className="named-input"><AtSign size={17} /><input id="profile-name" autoFocus maxLength={24} value={profileDraft} onChange={(event) => setProfileDraft(event.target.value)} placeholder="Твоё имя" /></div>
             <p className="field-hint">Имя хранится локально и отправляется собеседнику вместе с сообщением.</p>
+
+            <div className="vs-section-title">Внешний вид</div>
+            <label className="field-label">Акцентный цвет</label>
+            <div className="accent-row">
+              {[{ h: 78, label: 'Кислота' }, { h: 199, label: 'Win11' }, { h: 235, label: 'Blurple' }, { h: 265, label: 'Фиолет' }, { h: 330, label: 'Розовый' }, { h: 25, label: 'Оранж' }].map((preset) => (
+                <button type="button" key={preset.h} className={accentHue === preset.h ? 'accent-dot on' : 'accent-dot'} style={{ background: `hsl(${preset.h} 100% 65%)` }} title={preset.label} onClick={() => setAccentHue(preset.h)} />
+              ))}
+            </div>
+            <input type="range" min={0} max={359} step={1} value={accentHue} onChange={(event) => setAccentHue(Number(event.target.value))} className="gain-slider hue-slider" aria-label="Оттенок акцента" />
+            <div className="vs-toggle-line">
+              <span>Сообщения-пузыри (стиль Win11)</span>
+              <button type="button" className={bubbleStyle ? 'vs-switch on' : 'vs-switch'} onClick={() => setBubbleStyle((value) => !value)} aria-pressed={bubbleStyle}><i /></button>
+            </div>
+
             <button className="primary-action" disabled={!profileDraft.trim()}>Сохранить профиль</button>
           </form>
         </div>
