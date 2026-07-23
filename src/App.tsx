@@ -165,6 +165,8 @@ function App() {
   const [screenCodec, setScreenCodec] = useLocalStorageState<'auto' | 'VP9' | 'H264' | 'AV1'>('rift.screenCodec', 'auto');
   const screenSourceIdRef = useRef<string | null>(null);
   const screenAudioTransceiverRef = useRef<RTCRtpTransceiver | null>(null);
+  const remotePrimaryAudioRef = useRef<MediaStreamTrack | null>(null);
+  const mediaBusyRef = useRef(false);
   const [remoteAudioOn, setRemoteAudioOn] = useState(false);
   const [localSpeaking, setLocalSpeaking] = useState(false);
   const [remoteSpeaking, setRemoteSpeaking] = useState(false);
@@ -226,6 +228,9 @@ function App() {
     try {
       await pc.setLocalDescription(await pc.createOffer(options));
       channel.send(JSON.stringify({ type: 'rtc-offer', description: pc.localDescription }));
+    } catch (offerError) {
+      // A closing channel or a racing negotiation must not take the call down.
+      console.warn('[RIFT] media offer failed', offerError);
     } finally {
       makingMediaOfferRef.current = false;
     }
@@ -453,6 +458,7 @@ function App() {
       pcRef.current.close();
     }
     screenAudioTransceiverRef.current = null; // belonged to the old connection
+    remotePrimaryAudioRef.current = null;
     const PeerConnection = getPeerConnectionConstructor();
     const pc = new PeerConnection({
       iceServers: [
@@ -520,13 +526,20 @@ function App() {
       if (!remoteStreamRef.current.getTracks().some((track) => track.id === event.track.id)) {
         remoteStreamRef.current.addTrack(event.track);
       }
+      // Only the first audio m-line is the friend's microphone. Screen-share
+      // audio arrives on a later transceiver and must be audible but must NOT
+      // drive presence, otherwise stopping a share flips "друг в звонке" off.
+      const audioTransceivers = pc.getTransceivers().filter((item) => item.receiver.track.kind === 'audio');
+      const isPrimaryAudio = event.track.kind === 'audio'
+        && audioTransceivers[0]?.receiver.track.id === event.track.id;
+      if (isPrimaryAudio) remotePrimaryAudioRef.current = event.track;
       const showTrack = () => {
-        if (event.track.kind === 'audio') setRemoteAudioOn(true);
+        if (isPrimaryAudio) setRemoteAudioOn(true);
         if (event.track.kind === 'video') setRemoteVideoOn(true);
         window.requestAnimationFrame(attachCallStreams);
       };
       const hideTrack = () => {
-        if (event.track.kind === 'audio') setRemoteAudioOn(false);
+        if (isPrimaryAudio) setRemoteAudioOn(false);
         if (event.track.kind === 'video') setRemoteVideoOn(false);
       };
       event.track.onunmute = showTrack;
@@ -541,11 +554,15 @@ function App() {
   const renegotiateMedia = async () => {
     const channel = channelRef.current;
     if (channel?.readyState !== 'open') return;
-    if (politePeerRef.current) {
-      channel.send(JSON.stringify({ type: 'rtc-renegotiate-request' }));
-      return;
+    try {
+      if (politePeerRef.current) {
+        channel.send(JSON.stringify({ type: 'rtc-renegotiate-request' }));
+        return;
+      }
+      await sendCurrentMediaOffer();
+    } catch (renegotiateError) {
+      console.warn('[RIFT] renegotiate failed', renegotiateError);
     }
-    await sendCurrentMediaOffer();
   };
 
   const sendCallState = (audio: boolean, video: boolean) => {
@@ -674,7 +691,21 @@ function App() {
     }
   }, [scannerMode]);
 
+  // If the active mic device dies mid-call (USB headset unplugged), fall back
+  // to the system default instead of leaving the call silently broken.
+  const armMicRecovery = (track: MediaStreamTrack) => {
+    track.onended = () => {
+      if (rawMicTrackRef.current !== track) return;
+      setError('Микрофон отключился — переключаюсь на устройство по умолчанию…');
+      void changeInputDevice('');
+    };
+  };
+
   const enableMedia = async (kind: 'mic' | 'camera') => {
+    // Single in-flight start: a double-click must not spawn two capture
+    // pipelines fighting over the same transceiver.
+    if (mediaBusyRef.current) return;
+    mediaBusyRef.current = true;
     setError('');
     try {
       const stream = localStreamRef.current || new MediaStream();
@@ -693,6 +724,7 @@ function App() {
         let track = capturedTrack;
         if (capturedTrack.kind === 'audio') {
           rawMicTrackRef.current = capturedTrack;
+          armMicRecovery(capturedTrack);
           try {
             const pipeline = await createMicPipeline(capturedTrack, {
               rnnoise: noiseSuppressionOn,
@@ -733,6 +765,8 @@ function App() {
         ? 'Разреши RIFT доступ к микрофону и камере в настройках Windows'
         : 'Не удалось включить камеру или микрофон — проверь, что устройство не занято';
       setError(reason);
+    } finally {
+      mediaBusyRef.current = false;
     }
   };
 
@@ -859,12 +893,17 @@ function App() {
       setLocalSpeaking(false);
       return;
     }
-    const stop = createSpeakingMonitor(new MediaStream([raw]), setLocalSpeaking, {
+    // Probe a CLONE: if the raw track is also the sending track (pipeline
+    // fallback), the VAD gate disabling it would silence the detector too and
+    // the mic could never re-open. A clone keeps delivering audio regardless.
+    const probe = raw.clone();
+    const stop = createSpeakingMonitor(new MediaStream([probe]), setLocalSpeaking, {
       threshold: (vadAuto ? 12 : vadThreshold) * 0.45,
       onLevel: setInputLevel,
     });
     return () => {
       stop();
+      probe.stop();
       setLocalSpeaking(false);
       setInputLevel(0);
     };
@@ -896,13 +935,17 @@ function App() {
     };
   }, [micTestOn, callOpen, inputDeviceId, echoCancellation, autoGain]);
 
-  // Active-speaker detection for the remote peer (drives the "friend talking" ring).
+  // Active-speaker detection for the remote peer (drives the "friend talking"
+  // ring). Watches only the friend's MICROPHONE track — game/screen audio in
+  // the mixed remote stream must not light the ring permanently.
   useEffect(() => {
     if (!callOpen || !remoteAudioOn) {
       setRemoteSpeaking(false);
       return;
     }
-    const stop = createSpeakingMonitor(remoteStreamRef.current, setRemoteSpeaking);
+    const primary = remotePrimaryAudioRef.current;
+    const stream = primary ? new MediaStream([primary]) : remoteStreamRef.current;
+    const stop = createSpeakingMonitor(stream, setRemoteSpeaking);
     return () => {
       stop();
       setRemoteSpeaking(false);
@@ -957,6 +1000,7 @@ function App() {
       micPipelineRef.current = null;
       rawMicTrackRef.current?.stop();
       rawMicTrackRef.current = newRaw;
+      armMicRecovery(newRaw);
       const pipeline = await createMicPipeline(newRaw, {
         rnnoise: noiseSuppressionOn,
         gain: micGain,
@@ -990,6 +1034,10 @@ function App() {
 
   const videoTransceiver = () =>
     pcRef.current?.getTransceivers().find((item) => item.receiver.track.kind === 'video');
+
+  // The local "talking" ring reflects what the friend actually hears:
+  // muted or un-held PTT means no glow even while the raw mic picks up voice.
+  const localTalking = localSpeaking && micOn && (!pttEnabled || pttActive);
 
   // Discord-style fullscreen: double-click a tile (or its button) to expand.
   const toggleTileFullscreen = (element: HTMLElement | null) => {
@@ -1529,9 +1577,9 @@ function App() {
                 <span className="video-label">{deafened ? <VolumeX size={12} /> : null}Собеседник</span>
                 <button className="tile-fs" title="На весь экран (двойной клик)" onClick={() => toggleTileFullscreen(remoteTileRef.current)}><Maximize2 size={14} /></button>
               </div>
-              <div ref={localTileRef} className={localSpeaking && !cameraOn && !sharing ? 'video-tile local speaking' : 'video-tile local'} onDoubleClick={() => toggleTileFullscreen(localTileRef.current)}>
+              <div ref={localTileRef} className={localTalking && !cameraOn && !sharing ? 'video-tile local speaking' : 'video-tile local'} onDoubleClick={() => toggleTileFullscreen(localTileRef.current)}>
                 <video ref={localVideoRef} autoPlay muted playsInline />
-                {!cameraOn && !sharing && <div className="video-empty"><div className={localSpeaking ? 'orb own speaking' : 'orb own'}>Я</div></div>}
+                {!cameraOn && !sharing && <div className="video-empty"><div className={localTalking ? 'orb own speaking' : 'orb own'}>Я</div></div>}
                 <span className="video-label">{(pttEnabled ? !(micOn && pttActive) : !micOn) ? <MicOff size={12} /> : null}{profileName}{sharing && ' · экран'}</span>
                 <button className="tile-fs" title="На весь экран (двойной клик)" onClick={() => toggleTileFullscreen(localTileRef.current)}><Maximize2 size={14} /></button>
               </div>
