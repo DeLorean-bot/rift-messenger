@@ -164,7 +164,7 @@ function App() {
   const [screenQuality, setScreenQuality] = useLocalStorageState<ScreenQuality>('rift.screenQuality', { height: 1080, fps: 30, audio: true });
   const [screenCodec, setScreenCodec] = useLocalStorageState<'auto' | 'VP9' | 'H264' | 'AV1'>('rift.screenCodec', 'auto');
   const screenSourceIdRef = useRef<string | null>(null);
-  const screenAudioSenderRef = useRef<RTCRtpSender | null>(null);
+  const screenAudioTransceiverRef = useRef<RTCRtpTransceiver | null>(null);
   const [remoteAudioOn, setRemoteAudioOn] = useState(false);
   const [localSpeaking, setLocalSpeaking] = useState(false);
   const [remoteSpeaking, setRemoteSpeaking] = useState(false);
@@ -183,6 +183,8 @@ function App() {
   const remoteStreamRef = useRef(new MediaStream());
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteTileRef = useRef<HTMLDivElement>(null);
+  const localTileRef = useRef<HTMLDivElement>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -199,8 +201,11 @@ function App() {
   const packedSignal = useMemo(() => generatedSignal ? packSignal(generatedSignal) : '', [generatedSignal]);
 
   const attachCallStreams = useCallback(() => {
-    if (localVideoRef.current && localVideoRef.current.srcObject !== localStreamRef.current) {
-      localVideoRef.current.srcObject = localStreamRef.current;
+    // The local preview shows the screen share while it is active; remounting
+    // the call stage (minimize/restore) must not fall back to the camera stream.
+    const localPreview = screenStreamRef.current || localStreamRef.current;
+    if (localVideoRef.current && localVideoRef.current.srcObject !== localPreview) {
+      localVideoRef.current.srcObject = localPreview;
     }
     if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
       remoteVideoRef.current.srcObject = remoteStreamRef.current;
@@ -447,6 +452,7 @@ function App() {
       pcRef.current.onconnectionstatechange = null;
       pcRef.current.close();
     }
+    screenAudioTransceiverRef.current = null; // belonged to the old connection
     const PeerConnection = getPeerConnectionConstructor();
     const pc = new PeerConnection({
       iceServers: [
@@ -985,6 +991,13 @@ function App() {
   const videoTransceiver = () =>
     pcRef.current?.getTransceivers().find((item) => item.receiver.track.kind === 'video');
 
+  // Discord-style fullscreen: double-click a tile (or its button) to expand.
+  const toggleTileFullscreen = (element: HTMLElement | null) => {
+    if (!element) return;
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void element.requestFullscreen().catch(() => undefined);
+  };
+
   const applyVideoBitrate = async (quality: ScreenQuality) => {
     const sender = videoTransceiver()?.sender;
     if (!sender) return;
@@ -1014,10 +1027,11 @@ function App() {
     screenSourceIdRef.current = null;
     const cameraTrack = localStreamRef.current?.getVideoTracks()[0] || null;
     await videoTransceiver()?.sender.replaceTrack(cameraTrack);
-    if (screenAudioSenderRef.current && pcRef.current) {
-      await screenAudioSenderRef.current.replaceTrack(null).catch(() => undefined);
-      try { pcRef.current.removeTrack(screenAudioSenderRef.current); } catch { /* already gone */ }
-      screenAudioSenderRef.current = null;
+    const audioTransceiver = screenAudioTransceiverRef.current;
+    if (audioTransceiver) {
+      // Keep the transceiver for reuse; just silence its m-line.
+      await audioTransceiver.sender.replaceTrack(null).catch(() => undefined);
+      try { audioTransceiver.direction = 'inactive'; } catch { /* closed */ }
       await renegotiateMedia();
     }
     if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
@@ -1041,7 +1055,17 @@ function App() {
       }
       const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack && pcRef.current) {
-        screenAudioSenderRef.current = pcRef.current.addTrack(audioTrack, stream);
+        // A dedicated transceiver so screen audio can never hijack the mic
+        // m-line; reused across share sessions to avoid piling up m-lines.
+        if (screenAudioTransceiverRef.current) {
+          screenAudioTransceiverRef.current.direction = 'sendonly';
+          await screenAudioTransceiverRef.current.sender.replaceTrack(audioTrack);
+        } else {
+          screenAudioTransceiverRef.current = pcRef.current.addTransceiver(audioTrack, {
+            direction: 'sendonly',
+            streams: [stream],
+          });
+        }
       }
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       setSharing(true);
@@ -1096,16 +1120,20 @@ function App() {
   const changeScreenQuality = async (next: ScreenQuality) => {
     setScreenQuality(next);
     if (!sharing || !screenSourceIdRef.current || !window.riftDesktop) return;
-    // Re-capture at the new resolution/fps and hot-swap the track (no renegotiation).
+    // Re-capture at the new resolution/fps and hot-swap the tracks (no renegotiation).
     try {
       const stream = await captureScreenSource(screenSourceIdRef.current, next);
       const previous = screenStreamRef.current;
       screenStreamRef.current = stream;
       const videoTrack = stream.getVideoTracks()[0];
       await videoTransceiver()?.sender.replaceTrack(videoTrack);
+      const audioTrack = stream.getAudioTracks()[0];
+      if (audioTrack && screenAudioTransceiverRef.current) {
+        await screenAudioTransceiverRef.current.sender.replaceTrack(audioTrack).catch(() => undefined);
+      }
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       await applyVideoBitrate(next);
-      previous?.getVideoTracks().forEach((track) => track.stop());
+      previous?.getTracks().forEach((track) => track.stop());
       videoTrack.onended = () => void stopScreenShare();
     } catch {
       setError('Не удалось сменить качество демонстрации');
@@ -1495,15 +1523,17 @@ function App() {
         {callOpen && !callMinimized && (
           <section className="call-stage">
             <div className="video-grid">
-              <div className={remoteSpeaking && !remoteVideoOn ? 'video-tile remote speaking' : 'video-tile remote'}>
+              <div ref={remoteTileRef} className={remoteSpeaking && !remoteVideoOn ? 'video-tile remote speaking' : 'video-tile remote'} onDoubleClick={() => toggleTileFullscreen(remoteTileRef.current)}>
                 <video ref={remoteVideoRef} autoPlay muted playsInline />
                 {!remoteVideoOn && <div className="video-empty"><div className={remoteSpeaking ? 'orb speaking' : 'orb'}>?</div><span>{remoteAudioOn ? 'Друг в голосовом звонке' : 'Ожидаем друга в звонке'}</span></div>}
                 <span className="video-label">{deafened ? <VolumeX size={12} /> : null}Собеседник</span>
+                <button className="tile-fs" title="На весь экран (двойной клик)" onClick={() => toggleTileFullscreen(remoteTileRef.current)}><Maximize2 size={14} /></button>
               </div>
-              <div className={localSpeaking && !cameraOn && !sharing ? 'video-tile local speaking' : 'video-tile local'}>
+              <div ref={localTileRef} className={localSpeaking && !cameraOn && !sharing ? 'video-tile local speaking' : 'video-tile local'} onDoubleClick={() => toggleTileFullscreen(localTileRef.current)}>
                 <video ref={localVideoRef} autoPlay muted playsInline />
                 {!cameraOn && !sharing && <div className="video-empty"><div className={localSpeaking ? 'orb own speaking' : 'orb own'}>Я</div></div>}
                 <span className="video-label">{(pttEnabled ? !(micOn && pttActive) : !micOn) ? <MicOff size={12} /> : null}{profileName}{sharing && ' · экран'}</span>
+                <button className="tile-fs" title="На весь экран (двойной клик)" onClick={() => toggleTileFullscreen(localTileRef.current)}><Maximize2 size={14} /></button>
               </div>
             </div>
             {pttEnabled && (

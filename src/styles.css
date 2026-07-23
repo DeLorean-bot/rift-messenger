@@ -99,6 +99,13 @@ button { border: 0; background: none; cursor: pointer; }
 .orb.speaking { outline-color: var(--acid); box-shadow: 0 0 0 5px color-mix(in srgb, var(--acid) 16%, transparent), 0 0 26px color-mix(in srgb, var(--acid) 40%, transparent); }
 .video-label { position: absolute; z-index: 2; left: 10px; bottom: 10px; background: rgba(5,6,8,.72); padding: 5px 9px; border-radius: 7px; font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 5px; }
 
+/* Fullscreen (Discord-style: dblclick or hover button) */
+.tile-fs { position: absolute; z-index: 3; right: 10px; bottom: 10px; width: 30px; height: 30px; display: none; place-items: center; border-radius: 8px; background: rgba(5,6,8,.72); color: #d3d9e0; cursor: pointer; }
+.video-tile:hover .tile-fs { display: grid; }
+.tile-fs:hover { background: rgba(30,36,44,.95); color: #fff; }
+.video-tile:fullscreen { border-radius: 0; border: 0; background: #000; }
+.video-tile:fullscreen video { object-fit: contain; }
+
 /* Discord-style centered floating control dock */
 .call-controls {
   position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
